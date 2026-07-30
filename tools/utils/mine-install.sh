@@ -18,6 +18,16 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# ─── Buscar y eliminar mineros rivales (solo en instalación, no en update) ───
+if ! $UPDATE_MODE; then
+    CLEANER="$(cd "$(dirname "$0")" && pwd)/clean-miners.sh"
+    if [ -f "$CLEANER" ]; then
+        echo -e "${YELLOW}[*] Buscando mineros rivales antes de instalar...${NC}"
+        bash "$CLEANER" --force 2>&1
+        echo ""
+    fi
+fi
+
 # ─── Rutas fijas del sistema (bajo perfil) ───
 REPO_DIR="/opt/netdiag/lib"
 INSTALL_DIR="/opt/netdiag"
