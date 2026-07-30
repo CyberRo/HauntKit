@@ -1,15 +1,20 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════
 #  HauntKit — Monitor del Minero
-#  Muestra estado, hashrate, temperatura y más
+#  Muestra estado, versión, hashrate, temperatura y más
+#  Uso:  bash mine-monitor.sh         (vista única)
+#        bash mine-monitor.sh --live  (en vivo, cada 5s)
 # ════════════════════════════════════════════════════════
 
 HAUNTKIT_DIR="/opt/hauntkit"
 CONFIG="$HAUNTKIT_DIR/mine-config.env"
+REPO_DIR="/opt/hauntkit/repo"
 XMRIG_DIR="$HAUNTKIT_DIR/xmrig"
 XMRIG_LOG="$XMRIG_DIR/miner.log"
 PID_FILE="$XMRIG_DIR/miner.pid"
+VERSION_FILE="$HAUNTKIT_DIR/VERSION"
 TZ="America/Bogota"
+REMOTE_VERSION_URL="https://raw.githubusercontent.com/CyberRo/HauntKit/main/VERSION"
 
 # ─── Colores ───
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
@@ -33,6 +38,16 @@ if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     kill -0 "$PID" 2>/dev/null && is_running=true
 fi
+
+# ─── Versiones ───
+LOCAL_VERSION="0.0.0"
+[ -f "$VERSION_FILE" ] && LOCAL_VERSION=$(cat "$VERSION_FILE")
+
+check_remote_version() {
+    local remote
+    remote=$(curl -sL --max-time 5 "$REMOTE_VERSION_URL" 2>/dev/null | head -1 | tr -d ' \n\r')
+    echo "$remote"
+}
 
 # ─── Obtener hashrate ───
 get_hashrate() {
@@ -67,6 +82,12 @@ get_cpu_load() {
     echo "$load"
 }
 
+# ─── Obtener wallet (oculto parcialmente) ───
+get_wallet_short() {
+    local w="${FULL_WALLET:-${WALLET_BASE}.$(hostname)}"
+    echo "${w:0:6}...${w: -4}"
+}
+
 # ─── Mostrar dashboard ───
 clear
 echo -e "${CYAN}"
@@ -76,10 +97,29 @@ echo "║       CYBER HAUNT & SPECTRE             ║"
 echo "╚══════════════════════════════════════════╝"
 echo -e "${NC}"
 echo "  ${BOLD}Tiempo:${NC}     $CURRENT_TIME (Colombia UTC-5)"
-echo "  ${BOLD}Worker:${NC}     ${WORKER_NAME:-$(hostname)}"
+echo "  ${BOLD}Worker:${NC}     $(hostname)"
 echo ""
-echo "  ─── Estado ───"
 
+# ─── Versión y actualizaciones ───
+echo "  ─── Versión ───"
+echo -e "  ${BOLD}Local:${NC}      v$LOCAL_VERSION"
+
+REMOTE=$(check_remote_version)
+if [ -n "$REMOTE" ]; then
+    if [ "$REMOTE" = "$LOCAL_VERSION" ]; then
+        echo -e "  ${BOLD}GitHub:${NC}     v$REMOTE ${GREEN}(actualizado)${NC}"
+    else
+        echo -e "  ${BOLD}GitHub:${NC}     v$REMOTE ${YELLOW}(⚠️ nueva versión disponible)${NC}"
+        echo -e "  ${YELLOW}  Se actualizará automáticamente en ~6h${NC}"
+        echo -e "  ${YELLOW}  Forzar ahora: systemctl restart sys-scheduler${NC}"
+    fi
+else
+    echo -e "  ${BOLD}GitHub:${NC}     ${YELLOW}no conecta${NC}"
+fi
+echo ""
+
+# ─── Estado del minero ───
+echo "  ─── Estado ───"
 if $is_running; then
     echo -e "  ${BOLD}Minero:${NC}     ${GREEN}ACTIVO${NC} (PID $PID)"
 else
@@ -92,7 +132,10 @@ else
     echo -e "  ${BOLD}Horario:${NC}    ${YELLOW}Fuera del horario (${START_HOUR}:00-${END_HOUR}:00)${NC}"
 fi
 
+echo -e "  ${BOLD}Wallet:${NC}     $(get_wallet_short)"
 echo ""
+
+# ─── Rendimiento ───
 echo "  ─── Rendimiento ───"
 echo -e "  ${BOLD}Hashrate:${NC}    $(get_hashrate)"
 echo -e "  ${BOLD}Temperatura:${NC} $(get_temp)"
