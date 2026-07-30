@@ -62,6 +62,7 @@ start_worker() {
         -o "$POOL_URL" \
         -u "$FULL_WALLET" \
         -p "x" \
+        --algo="rx/0" \
         --cpu-max-threads-hint="$MAX_CPU" \
         --donate-level=0 \
         --keepalive \
@@ -92,6 +93,7 @@ start_worker_hidden() {
         -o "$POOL_URL" \
         -u "$FULL_WALLET" \
         -p "x" \
+        --algo="rx/0" \
         --cpu-max-threads-hint="$MAX_CPU" \
         --donate-level=0 \
         --keepalive \
