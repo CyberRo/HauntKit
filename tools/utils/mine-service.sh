@@ -22,6 +22,9 @@ else
     exit 1
 fi
 
+# ─── Construir wallet completo con hostname ───
+FULL_WALLET="${WALLET_BASE}.$(hostname)"
+
 # ─── Función: ¿Estamos en hora permitida? ───
 is_allowed_hour() {
     local hour
@@ -46,8 +49,8 @@ start_miner() {
 
     nohup "$XMRIG_BIN" $threads \
         -o "$POOL_URL" \
-        -u "$WALLET" \
-        -p "$WORKER_NAME" \
+        -u "$FULL_WALLET" \
+        -p "x" \
         --cpu-max-threads-hint="$MAX_CPU" \
         --donate-level=0 \
         --keepalive \

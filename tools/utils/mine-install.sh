@@ -29,17 +29,22 @@ echo -e "${NC}"
 
 # ─── Verificar config ───
 CONFIG_SRC="$SCRIPT_DIR/mine-config.env"
+CONFIG_EXAMPLE="$SCRIPT_DIR/mine-config.env.example"
 CONFIG_DST="/opt/hauntkit/mine-config.env"
 
 if [ ! -f "$CONFIG_SRC" ]; then
-    if [ ! -f "$CONFIG_DST" ]; then
-        echo -e "${RED}[!] No existe mine-config.env${NC}"
-        echo "  Cópialo desde mine-config.env.example y edítalo:"
+    if [ -f "$CONFIG_EXAMPLE" ]; then
+        echo -e "${YELLOW}[*] No hay mine-config.env, usando mine-config.env.example${NC}"
+        CONFIG_SRC="$CONFIG_EXAMPLE"
+    elif [ -f "$CONFIG_DST" ]; then
+        echo -e "${YELLOW}[*] Usando config existente en $CONFIG_DST${NC}"
+    else
+        echo -e "${RED}[!] No se encuentra ninguna configuración${NC}"
+        echo "  Crea mine-config.env a partir del ejemplo:"
         echo "  cp $SCRIPT_DIR/mine-config.env.example $SCRIPT_DIR/mine-config.env"
         echo "  nano $SCRIPT_DIR/mine-config.env"
         exit 1
     fi
-    echo -e "${YELLOW}[*] Usando config existente en $CONFIG_DST${NC}"
 else
     echo -e "${GREEN}[✓] Config encontrada${NC}"
 fi
