@@ -245,8 +245,8 @@ if [ -f "$CONFIG_DST" ]; then
 fi
 
 # Valores por defecto
-START_HOUR="${START_HOUR:-18}"
-END_HOUR="${END_HOUR:-7}"
+START_HOUR="${START_HOUR:-17:30}"
+END_HOUR="${END_HOUR:-8}"
 MAX_CPU="${MAX_CPU:-80}"
 THREADS="${THREADS:-0}"
 POOL_URL="${POOL_URL:-gulf.moneroocean.stream:10128}"

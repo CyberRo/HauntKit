@@ -28,8 +28,8 @@ else
 fi
 
 # ─── Valores por defecto ───
-START_HOUR="${START_HOUR:-18}"
-END_HOUR="${END_HOUR:-7}"
+START_HOUR="${START_HOUR:-17:30}"
+END_HOUR="${END_HOUR:-8}"
 MAX_CPU="${MAX_CPU:-80}"
 MAX_TEMP="${MAX_TEMP:-85}"
 THREADS="${THREADS:-0}"
