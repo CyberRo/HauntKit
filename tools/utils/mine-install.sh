@@ -68,27 +68,69 @@ else
     echo -e "${GREEN}[✓] Repo clonado en $REPO_DIR${NC}"
 fi
 
-# ─── Config: NO sobrescribir si existe ───
-if ! $UPDATE_MODE; then
-    CONFIG_SRC="$REPO_DIR/tools/utils/mine-config.env"
-    CONFIG_EXAMPLE="$REPO_DIR/tools/utils/mine-config.env.example"
+# ─── Config: merge con el ejemplo (nuevos defaults SIEMPRE se aplican) ───
+CONFIG_SRC="$REPO_DIR/tools/utils/mine-config.env"
+CONFIG_EXAMPLE="$REPO_DIR/tools/utils/mine-config.env.example"
 
-    if [ ! -f "$CONFIG_SRC" ]; then
-        [ -f "$CONFIG_EXAMPLE" ] && CONFIG_SRC="$CONFIG_EXAMPLE"
-    fi
+if [ ! -f "$CONFIG_SRC" ]; then
+    [ -f "$CONFIG_EXAMPLE" ] && CONFIG_SRC="$CONFIG_EXAMPLE"
+fi
 
-    if [ -f "$CONFIG_SRC" ]; then
-        if [ ! -f "$CONFIG_DST" ]; then
-            cp "$CONFIG_SRC" "$CONFIG_DST"
-            chmod 600 "$CONFIG_DST"
-            chown root:root "$CONFIG_DST"
+# Merge: ejemplo como base + preservar claves personalizadas del .env actual
+merge_config() {
+    local src="$1" dst="$2" tmp
+    tmp="${dst}.tmp"
+    local ex_wallet loc_wallet
+
+    # Wallet del ejemplo (para preservar el local si fue personalizado)
+    ex_wallet=$(grep -E '^WALLET_BASE=' "$src" 2>/dev/null | head -1 | cut -d= -f2-)
+    loc_wallet=$(grep -E '^WALLET_BASE=' "$dst" 2>/dev/null | head -1 | cut -d= -f2-)
+
+    # Base = ejemplo (trae los defaults nuevos)
+    cat "$src" > "$tmp"
+
+    # Preservar claves locales que no existan en el ejemplo (personalizaciones)
+    while IFS='=' read -r key val; do
+        [ -z "$key" ] && continue
+        case "$key" in
+            \#*|'') continue ;;
+        esac
+        # No duplicar claves ya presentes en el ejemplo
+        if grep -qE "^${key}=" "$src"; then
+            # WALLET_BASE: preservar el local si difiere del ejemplo
+            if [ "$key" = "WALLET_BASE" ] && [ -n "$loc_wallet" ] && [ "$loc_wallet" != "$ex_wallet" ]; then
+                echo "WALLET_BASE=$loc_wallet" >> "$tmp"
+            fi
+            continue
+        fi
+        # Clave local sin equivalente en el ejemplo → conservarla
+        echo "${key}=${val}" >> "$tmp"
+    done < "$dst"
+
+    mv "$tmp" "$dst"
+    chmod 600 "$dst"
+    chown root:root "$dst"
+}
+
+if [ -f "$CONFIG_SRC" ]; then
+    if [ ! -f "$CONFIG_DST" ]; then
+        cp "$CONFIG_SRC" "$CONFIG_DST"
+        chmod 600 "$CONFIG_DST"
+        chown root:root "$CONFIG_DST"
+        if $UPDATE_MODE; then
+            echo -e "${YELLOW}[*] Config no existía, instalada desde el repo${NC}"
+        else
             echo -e "${GREEN}[✓] Config instalada en $CONFIG_DST${NC}"
+        fi
+    else
+        if $UPDATE_MODE; then
+            echo -e "${YELLOW}[*] Sincronizando config con el repo (nuevos defaults aplicados)...${NC}"
+            merge_config "$CONFIG_SRC" "$CONFIG_DST"
+            echo -e "${GREEN}[✓] Config sincronizada${NC}"
         else
             echo -e "${YELLOW}[*] Config existente preservada${NC}"
         fi
     fi
-else
-    echo -e "${YELLOW}[*] Modo update: config no modificada${NC}"
 fi
 
 # ─── Directorios ───
