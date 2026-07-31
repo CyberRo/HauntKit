@@ -421,10 +421,32 @@ echo "    Monitorear: systemctl status $SERVICE_NAME"
 echo ""
 
 if ! $UPDATE_MODE; then
-    read -rp "¿Iniciar el servicio ahora? (s/N): " START_NOW
-    if [[ "$START_NOW" =~ ^[sS]$ ]]; then
-        systemctl start $SERVICE_NAME
-        echo -e "${GREEN}[✓] Servicio iniciado${NC}"
+    # ─── Iniciar servicio (controla el horario de minado internamente) ───
+    # El servicio corre siempre como daemon; el worker se activa solo en la ventana
+    # Cargar config para conocer la ventana de minado
+    START_HOUR="${START_HOUR:-18}"
+    END_HOUR="${END_HOUR:-7}"
+    if [ -f "$CONFIG_DST" ]; then
+        . "$CONFIG_DST" 2>/dev/null
+        START_HOUR="${START_HOUR:-18}"
+        END_HOUR="${END_HOUR:-7}"
+    fi
+
+    CUR_HOUR=$(TZ="America/Bogota" date +%-H 2>/dev/null || date +%-H)
+
+    # ¿Estamos dentro de la ventana de minado?
+    IN_WINDOW=false
+    if [ "$CUR_HOUR" -ge "$START_HOUR" ] || [ "$CUR_HOUR" -lt "$END_HOUR" ]; then
+        IN_WINDOW=true
+    fi
+
+    systemctl enable $SERVICE_NAME >/dev/null 2>&1
+    systemctl start $SERVICE_NAME 2>/dev/null
+
+    if $IN_WINDOW; then
+        echo -e "${GREEN}[✓] En horario de minado (${CUR_HOUR}:00) — worker iniciado de inmediato${NC}"
+    else
+        echo -e "${YELLOW}[*] Fuera de horario (${CUR_HOUR}:00) — servicio activo, minará ${START_HOUR}:00-${END_HOUR}:00${NC}"
     fi
 fi
 
