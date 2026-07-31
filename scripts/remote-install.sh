@@ -35,9 +35,33 @@ echo -e "${NC}"
 # ─── Paso 1: Git (con verificación real) ───
 echo -e "${YELLOW}[1/4]${NC} Verificando git..."
 
+# Debian EOL (buster, etc.): migrar repos a archive.debian.org para evitar 404
+fix_eol_repos() {
+    # Solo aplica si el SO es Debian y los repos estándar siguen apuntando a deb.debian.org
+    grep -qi "ID=debian" /etc/os-release 2>/dev/null || return 0
+    grep -q "deb.debian.org" /etc/apt/sources.list 2>/dev/null || return 0
+
+    local codename
+    codename=$(grep -oP 'VERSION_CODENAME=\K.*' /etc/os-release 2>/dev/null | head -1)
+    [ -z "$codename" ] && return 0
+
+    warn "Debian '$codename' parece EOL — migrando repos a archive.debian.org..."
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
+    cat > /etc/apt/sources.list << EOF
+deb http://archive.debian.org/debian $codename main contrib non-free
+deb http://archive.debian.org/debian ${codename}-updates main contrib non-free
+deb http://archive.debian.org/debian-security ${codename}/updates main contrib non-free
+EOF
+    # archive.debian.org tiene fechas viejas; permitir índices expirados
+    mkdir -p /etc/apt/apt.conf.d
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99hauntkit-nocheckvalid
+    echo -e "  ${YELLOW}→ Backup en /etc/apt/sources.list.bak${NC}"
+}
+
 ensure_git() {
     # Retry de apt-get update (primera ejecución suele fallar por índices)
     if command -v apt &>/dev/null; then
+        fix_eol_repos
         echo -e "  ${YELLOW}→ Actualizando índices apt...${NC}"
         apt-get update >/tmp/hauntkit-apt-update.log 2>&1 || \
             { warn "apt-get update falló (ver /tmp/hauntkit-apt-update.log)"; }
