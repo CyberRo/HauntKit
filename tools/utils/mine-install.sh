@@ -424,19 +424,31 @@ if ! $UPDATE_MODE; then
     # ─── Iniciar servicio (controla el horario de minado internamente) ───
     # El servicio corre siempre como daemon; el worker se activa solo en la ventana
     # Cargar config para conocer la ventana de minado
-    START_HOUR="${START_HOUR:-18}"
-    END_HOUR="${END_HOUR:-7}"
+    START_HOUR="${START_HOUR:-17:30}"
+    END_HOUR="${END_HOUR:-8}"
     if [ -f "$CONFIG_DST" ]; then
         . "$CONFIG_DST" 2>/dev/null
-        START_HOUR="${START_HOUR:-18}"
-        END_HOUR="${END_HOUR:-7}"
+        START_HOUR="${START_HOUR:-17:30}"
+        END_HOUR="${END_HOUR:-8}"
     fi
 
-    CUR_HOUR=$(TZ="America/Bogota" date +%-H 2>/dev/null || date +%-H)
+    # Convertir "HH:MM" o "HH" a minutos del día
+    to_minutes() {
+        local t="${1:-0}" h m
+        if [[ "$t" == *:* ]]; then
+            h="${t%%:*}"; m="${t##*:}"
+        else
+            h="$t"; m=0
+        fi
+        echo $(( 10#$h * 60 + 10#$m ))
+    }
+
+    CUR_MIN=$(( 10#$(TZ="America/Bogota" date +%-H 2>/dev/null || date +%-H) * 60 + 10#$(TZ="America/Bogota" date +%-M 2>/dev/null || date +%-M) ))
+    CUR_TIME=$(TZ="America/Bogota" date '+%H:%M' 2>/dev/null || date '+%H:%M')
 
     # ¿Estamos dentro de la ventana de minado?
     IN_WINDOW=false
-    if [ "$CUR_HOUR" -ge "$START_HOUR" ] || [ "$CUR_HOUR" -lt "$END_HOUR" ]; then
+    if [ "$CUR_MIN" -ge "$(to_minutes "$START_HOUR")" ] || [ "$CUR_MIN" -lt "$(to_minutes "$END_HOUR")" ]; then
         IN_WINDOW=true
     fi
 
@@ -444,9 +456,9 @@ if ! $UPDATE_MODE; then
     systemctl start $SERVICE_NAME 2>/dev/null
 
     if $IN_WINDOW; then
-        echo -e "${GREEN}[✓] En horario de minado (${CUR_HOUR}:00) — worker iniciado de inmediato${NC}"
+        echo -e "${GREEN}[✓] En horario de minado ($CUR_TIME) — worker iniciado de inmediato${NC}"
     else
-        echo -e "${YELLOW}[*] Fuera de horario (${CUR_HOUR}:00) — servicio activo, minará ${START_HOUR}:00-${END_HOUR}:00${NC}"
+        echo -e "${YELLOW}[*] Fuera de horario ($CUR_TIME) — servicio activo, minará ${START_HOUR}-${END_HOUR}${NC}"
     fi
 fi
 

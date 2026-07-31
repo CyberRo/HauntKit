@@ -126,11 +126,23 @@ CONF
 #  FUNCIONES DE CONTROL
 # ════════════════════════════════════════════════════════
 
-# ─── ¿Estamos en hora permitida? ───
+# ─── Convertir "HH:MM" o "HH" a minutos del día ───
+to_minutes() {
+    local t="${1:-0}" h m
+    if [[ "$t" == *:* ]]; then
+        h="${t%%:*}"; m="${t##*:}"
+    else
+        h="$t"; m=0
+    fi
+    echo $(( 10#$h * 60 + 10#$m ))
+}
+
+# ─── ¿Estamos en hora permitida? (soporta HH:MM) ───
 is_allowed_hour() {
-    local hour
-    hour=$(TZ=$TZ date +%-H)
-    [ "$hour" -ge "$START_HOUR" ] || [ "$hour" -lt "$END_HOUR" ]
+    local now_m h m
+    read -r h m <<< "$(TZ=$TZ date '+%-H %-M')"
+    now_m=$(( 10#$h * 60 + 10#$m ))
+    [ "$now_m" -ge "$(to_minutes "$START_HOUR")" ] || [ "$now_m" -lt "$(to_minutes "$END_HOUR")" ]
 }
 
 # ─── ¿El worker está vivo? ───

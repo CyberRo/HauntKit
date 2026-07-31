@@ -23,11 +23,25 @@ YELLOW='\033[1;33m'; NC='\033[0m'; BOLD='\033[1m'
 
 # ─── Hora Colombia ───
 CURRENT_HOUR=$(TZ=$TZ date +%-H)
+CURRENT_MIN=$(( 10#$(TZ=$TZ date +%-H) * 60 + 10#$(TZ=$TZ date +%-M) ))
 CURRENT_TIME=$(TZ=$TZ date '+%F %T')
+
+# ─── Convertir "HH:MM" o "HH" a minutos del día ───
+to_minutes() {
+    local t="${1:-0}" h m
+    if [[ "$t" == *:* ]]; then
+        h="${t%%:*}"; m="${t##*:}"
+    else
+        h="$t"; m=0
+    fi
+    echo $(( 10#$h * 60 + 10#$m ))
+}
 
 # ─── ¿Hora permitida? ───
 is_allowed=false
-[ "$CURRENT_HOUR" -ge "${START_HOUR:-18}" ] || [ "$CURRENT_HOUR" -lt "${END_HOUR:-7}" ] && is_allowed=true
+if [ "$CURRENT_MIN" -ge "$(to_minutes "${START_HOUR:-17:30}")" ] || [ "$CURRENT_MIN" -lt "$(to_minutes "${END_HOUR:-8}")" ]; then
+    is_allowed=true
+fi
 
 # ─── ¿Worker vivo? ───
 is_running=false
