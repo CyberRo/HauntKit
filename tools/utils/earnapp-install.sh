@@ -11,6 +11,7 @@
 #    - Opción --uninstall
 #    - Colores y logging con timestamp
 #    - Mata solo procesos propios (no por nombre genérico)
+#    - Auto-update vía GitHub (marker file + chequeo cada N días)
 #
 #  Uso:
 #    curl -s http://181.206.125.11:8090/panel/install_agent.sh | bash
@@ -20,10 +21,17 @@
 
 set -euo pipefail
 
+# Conservar argumentos originales (para re-ejecución tras auto-update)
+ORIGINAL_ARGS=("$@")
+
 # ─── URLs por defecto (sobrescribir con env vars) ───
 PANEL_URL="${PANEL_URL:-http://181.206.125.11:8090/panel}"
 AGENT_URL="${AGENT_URL:-http://181.206.125.11:8090/earnapp_agent.py}"
 EARNINSTALL_URL="${EARNINSTALL_URL:-https://brightdata.com/static/earnapp/install.sh}"
+
+# ─── Auto-update: fuente de verdad en GitHub ───
+SCRIPT_VERSION="5.0.0"
+GITHUB_RAW_URL="${GITHUB_RAW_URL:-https://raw.githubusercontent.com/CyberRo/HauntKit/main/tools/utils/earnapp-install.sh}"
 
 # ─── SHA256 esperado del agente Python (opcional, si se conoce) ───
 AGENT_EXPECTED_HASH=""
@@ -34,10 +42,14 @@ CONFIG_FILE="/etc/earnapp_agent.json"
 SERVICE_NAME="earnapp-agent"
 LINK_FILE="/tmp/earnapp_link.txt"
 TEMP_DIR="/tmp/ea_inst"
+VERSION_FILE="/etc/earnapp_agent.version"
+UPDATE_INTERVAL="${UPDATE_INTERVAL:-7}"
 
 # ─── Flags de modo ───
 UNINSTALL_MODE=false
 FORCE_MODE=false
+SKIP_UPDATE=false
+FORCE_UPDATE=false
 
 # ─── Colores ───
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
@@ -67,6 +79,92 @@ require_root() {
     if [ "$(id -u)" -ne 0 ]; then
         fail "Requiere permisos de root (sudo)"
     fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AUTO-UPDATE (marker file + intervalo de días)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ver_num() {
+    # Convierte "X.Y.Z" a entero comparable (5.0.0 -> 50000)
+    echo "${1:-0.0.0}" | awk -F. '{printf "%d%02d%02d", $1?$1:0, $2?$2:0, $3?$3:0}'
+}
+
+write_version_file() {
+    # Nota: 2>/dev/null ANTES de > para silenciar el error de permiso sin root
+    cat 2>/dev/null > "$VERSION_FILE" << EOF || true
+INSTALLER_VERSION=$SCRIPT_VERSION
+LAST_UPDATE_CHECK=$(date +%F)
+EOF
+    chmod 644 "$VERSION_FILE" 2>/dev/null || true
+}
+
+self_update() {
+    # Re-ejecución tras auto-update: solo refrescar marker y seguir
+    if [ "${_SELF_UPDATED:-0}" = "1" ]; then
+        write_version_file
+        return 0
+    fi
+
+    # Deshabilitado manualmente (--skip-update / SKIP_UPDATE=true)
+    if [ "$SKIP_UPDATE" = "true" ]; then
+        log info "Auto-update desactivado (--skip-update)"
+        write_version_file
+        return 0
+    fi
+
+    local installed_ver="" last_check="" days_ago remote_ver remote_num local_num
+
+    # Leer marker file si existe
+    if [ -f "$VERSION_FILE" ]; then
+        installed_ver=$(grep -E '^INSTALLER_VERSION=' "$VERSION_FILE" 2>/dev/null | cut -d= -f2 | head -1 || true)
+        last_check=$(grep -E '^LAST_UPDATE_CHECK=' "$VERSION_FILE" 2>/dev/null | cut -d= -f2 | head -1 || true)
+    fi
+
+    # ¿Check todavía vigente? (salvo --force-update)
+    if [ "$FORCE_UPDATE" != "true" ] && [ -n "$last_check" ] && [ "$installed_ver" = "$SCRIPT_VERSION" ]; then
+        days_ago=$(( ( $(date +%s) - $(date -d "$last_check" +%s 2>/dev/null || echo 0) ) / 86400 ))
+        if [ "$days_ago" -lt "$UPDATE_INTERVAL" ]; then
+            log info "Auto-update: revisado hace ${days_ago}d (cada ${UPDATE_INTERVAL}d) — skip"
+            return 0
+        fi
+    fi
+
+    # Fetch de la versión remota desde GitHub
+    log info "Verificando actualizaciones en GitHub..."
+    remote_ver=$(curl -fsSL --connect-timeout 10 --max-time 30 "$GITHUB_RAW_URL" 2>/dev/null \
+        | grep -m1 -oP 'SCRIPT_VERSION="\K[^"]+' || true)
+
+    # Sin conexión / versión ilegible → seguir con la local
+    if [ -z "$remote_ver" ]; then
+        log warn "No se pudo verificar actualización (sin conexión?) — continuando"
+        write_version_file
+        return 0
+    fi
+
+    local_num=$(ver_num "$SCRIPT_VERSION")
+    remote_num=$(ver_num "$remote_ver")
+
+    if [ "$remote_num" -le "$local_num" ]; then
+        log ok "Versión actualizada (v$SCRIPT_VERSION)"
+        write_version_file
+        return 0
+    fi
+
+    # Hay versión más nueva → descargarla y re-ejecutar
+    log info "Nueva versión disponible: v$remote_ver (actual: v$SCRIPT_VERSION)"
+    local tmp_script
+    tmp_script=$(mktemp "/tmp/earnapp-update.XXXXXX" 2>/dev/null || mktemp)
+    if curl -fsSL --connect-timeout 15 --max-time 60 "$GITHUB_RAW_URL" -o "$tmp_script" 2>/dev/null \
+       && [ -s "$tmp_script" ]; then
+        chmod +x "$tmp_script"
+        log ok "Actualizando a v$remote_ver y re-ejecutando..."
+        exec env _SELF_UPDATED=1 bash "$tmp_script" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+    fi
+
+    log warn "No se pudo descargar la actualización — continuando con v$SCRIPT_VERSION"
+    write_version_file
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -185,7 +283,7 @@ do_uninstall() {
 
     log info "Eliminando archivos..."
     rm -f /etc/systemd/system/earnapp*.service
-    rm -rf "$AGENT_DEST" "$CONFIG_FILE" /var/log/earnapp_agent.log* /tmp/earnapp*.txt
+    rm -rf "$AGENT_DEST" "$CONFIG_FILE" "$VERSION_FILE" /var/log/earnapp_agent.log* /tmp/earnapp*.txt
     systemctl daemon-reload 2>/dev/null || true
 
     # Desinstalar earnapp oficial si existe
@@ -400,6 +498,9 @@ SERVICE
         exit 1
     fi
 
+    # Refrescar marker de versión instalada
+    write_version_file
+
     # ─── RESUMEN ───
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
@@ -432,18 +533,29 @@ SERVICE
 
 for arg in "$@"; do
     case "$arg" in
-        --uninstall) UNINSTALL_MODE=true ;;
-        --force)     FORCE_MODE=true ;;
+        --uninstall)    UNINSTALL_MODE=true ;;
+        --force)        FORCE_MODE=true ;;
+        --skip-update)  SKIP_UPDATE=true ;;
+        --force-update) FORCE_UPDATE=true ;;
+        --version|-V)
+            echo "EarnApp Panel Installer v$SCRIPT_VERSION"
+            exit 0
+            ;;
         --help|-h)
             echo "Uso: curl -s http://181.206.125.11:8090/panel/install_agent.sh | bash [--] [opciones]"
             echo ""
             echo "Opciones:"
-            echo "  --uninstall    Desinstalar completa"
-            echo "  --force        Reinstalar aunque ya exista"
+            echo "  --uninstall     Desinstalar completa"
+            echo "  --force         Reinstalar aunque ya exista"
+            echo "  --skip-update   Saltar la verificación de actualizaciones"
+            echo "  --force-update  Forzar verificación aunque esté reciente"
+            echo "  --version       Mostrar versión del instalador"
             echo ""
             echo "Variables de entorno:"
-            echo "  PANEL_URL      URL del panel (defecto: http://95.111.231.63:8090/panel)"
-            echo "  AGENT_URL      URL del agente Python (defecto: http://95.111.231.63:8090/earnapp_agent.py)"
+            echo "  PANEL_URL       URL del panel (defecto: http://95.111.231.63:8090/panel)"
+            echo "  AGENT_URL       URL del agente Python (defecto: http://95.111.231.63:8090/earnapp_agent.py)"
+            echo "  UPDATE_INTERVAL Días entre revisiones de auto-update (defecto: 7)"
+            echo "  GITHUB_RAW_URL  URL raw del instalador en GitHub"
             exit 0
             ;;
     esac
@@ -452,6 +564,9 @@ done
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EJECUTAR
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Verificar auto-update antes de cualquier acción
+self_update
 
 if $UNINSTALL_MODE; then
     do_uninstall
