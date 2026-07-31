@@ -21,8 +21,8 @@
 set -euo pipefail
 
 # ─── URLs por defecto (sobrescribir con env vars) ───
-PANEL_URL="${PANEL_URL:-http://95.111.231.63:8090/panel}"
-AGENT_URL="${AGENT_URL:-http://95.111.231.63:8090/earnapp_agent.py}"
+PANEL_URL="${PANEL_URL:-http://181.206.125.11:8090/panel}"
+AGENT_URL="${AGENT_URL:-http://181.206.125.11:8090/earnapp_agent.py}"
 EARNINSTALL_URL="${EARNINSTALL_URL:-https://brightdata.com/static/earnapp/install.sh}"
 
 # ─── SHA256 esperado del agente Python (opcional, si se conoce) ───
