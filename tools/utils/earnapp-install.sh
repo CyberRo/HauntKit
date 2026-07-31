@@ -1,22 +1,26 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-#  EarnApp Panel — Instalador Automático v5 (mejorado)
-#  Mejoras sobre v4.2 original:
-#    - Señalización (trap) para limpieza en Ctrl+C
-#    - Multi-distro: detecta apt/yum/apk/pacman automáticamente
-#    - Polling en vez de sleep hardcodeados
-#    - SHA256 de descargas para verificar integridad
-#    - Limpieza automática de temporales
-#    - URLs configurables por variable de entorno
-#    - Opción --uninstall
-#    - Colores y logging con timestamp
-#    - Mata solo procesos propios (no por nombre genérico)
+#  EarnApp — Instalador Automático v5.2.0
+#  Sin servidor ni agente propio: instala el binario oficial de EarnApp,
+#  se auto-actualiza desde GitHub, mantiene el nodo 24/7 (watchdog systemd)
+#  y muestra el link de activación.
+#
+#  Características:
 #    - Auto-update vía GitHub (marker file + chequeo cada N días)
+#    - Watchdog systemd (timer cada 7 días): re-arranca el nodo si se cae,
+#      refresca el link y actualiza el script instalado
+#    - Blindaje del servicio (Restart=always + sin límite de reintentos)
+#    - Verificación de conectividad antes de instalar
+#    - Logging persistente en /var/log/earnapp-install.log
+#    - Instalación en modo auto (-y) sin preguntas interactivas
+#    - Captura robusta del link de activación (config, log y polling)
+#    - Multi-distro (apt/yum/dnf/apk/pacman)
+#    - Opciones --uninstall / --force / --watchdog
 #
 #  Uso:
-#    curl -s http://181.206.125.11:8090/panel/install_agent.sh | bash
-#    curl -s http://181.206.125.11:8090/panel/install_agent.sh | bash -s -- --uninstall
-#    curl -s http://181.206.125.11:8090/panel/install_agent.sh | bash -s -- --force
+#    curl -s https://raw.githubusercontent.com/CyberRo/HauntKit/main/tools/utils/earnapp-install.sh | bash
+#    curl -s https://raw.githubusercontent.com/CyberRo/HauntKit/main/tools/utils/earnapp-install.sh | bash -s -- --uninstall
+#    curl -s https://raw.githubusercontent.com/CyberRo/HauntKit/main/tools/utils/earnapp-install.sh | bash -s -- --force
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -25,24 +29,20 @@ set -euo pipefail
 ORIGINAL_ARGS=("$@")
 
 # ─── URLs por defecto (sobrescribir con env vars) ───
-PANEL_URL="${PANEL_URL:-http://181.206.125.11:8090/panel}"
-AGENT_URL="${AGENT_URL:-http://181.206.125.11:8090/earnapp_agent.py}"
 EARNINSTALL_URL="${EARNINSTALL_URL:-https://brightdata.com/static/earnapp/install.sh}"
 
 # ─── Auto-update: fuente de verdad en GitHub ───
-SCRIPT_VERSION="5.0.0"
+SCRIPT_VERSION="5.2.0"
 GITHUB_RAW_URL="${GITHUB_RAW_URL:-https://raw.githubusercontent.com/CyberRo/HauntKit/main/tools/utils/earnapp-install.sh}"
 
-# ─── SHA256 esperado del agente Python (opcional, si se conoce) ───
-AGENT_EXPECTED_HASH=""
-
 # ─── Rutas fijas ───
-AGENT_DEST="/usr/local/bin/earnapp_agent.py"
-CONFIG_FILE="/etc/earnapp_agent.json"
-SERVICE_NAME="earnapp-agent"
 LINK_FILE="/tmp/earnapp_link.txt"
 TEMP_DIR="/tmp/ea_inst"
 VERSION_FILE="/etc/earnapp_agent.version"
+INSTALLED_COPY="/usr/local/bin/earnapp-install.sh"
+WATCHDOG_TIMER="earnapp-watchdog.timer"
+WATCHDOG_SERVICE="earnapp-watchdog.service"
+LOG_FILE="/var/log/earnapp-install.log"
 UPDATE_INTERVAL="${UPDATE_INTERVAL:-7}"
 
 # ─── Flags de modo ───
@@ -50,6 +50,7 @@ UNINSTALL_MODE=false
 FORCE_MODE=false
 SKIP_UPDATE=false
 FORCE_UPDATE=false
+WATCHDOG_MODE=false
 
 # ─── Colores ───
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'
@@ -86,7 +87,7 @@ require_root() {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ver_num() {
-    # Convierte "X.Y.Z" a entero comparable (5.0.0 -> 50000)
+    # Convierte "X.Y.Z" a entero comparable (5.2.0 -> 50200)
     echo "${1:-0.0.0}" | awk -F. '{printf "%d%02d%02d", $1?$1:0, $2?$2:0, $3?$3:0}'
 }
 
@@ -158,6 +159,8 @@ self_update() {
     if curl -fsSL --connect-timeout 15 --max-time 60 "$GITHUB_RAW_URL" -o "$tmp_script" 2>/dev/null \
        && [ -s "$tmp_script" ]; then
         chmod +x "$tmp_script"
+        # Mantener la copia instalada del script sincronizada (para el watchdog)
+        cp "$tmp_script" "$INSTALLED_COPY" 2>/dev/null || true
         log ok "Actualizando a v$remote_ver y re-ejecutando..."
         exec env _SELF_UPDATED=1 bash "$tmp_script" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
     fi
@@ -208,6 +211,24 @@ update_pkg_index() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  VERIFICACIÓN DE CONECTIVIDAD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+check_connectivity() {
+    log info "Verificando conectividad..."
+    if curl -fsSL --connect-timeout 10 --max-time 15 "https://cdn-earnapp.b-cdn.net" -o /dev/null 2>/dev/null; then
+        log ok "Conectividad OK (CDN earnapp accesible)"
+        return 0
+    fi
+    # Fallback: al menos hay internet general
+    if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+        log warn "CDN de earnapp no accesible, pero hay internet — continuando"
+        return 0
+    fi
+    fail "Sin conexión a internet. Verifica la red del cliente."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  ESPERA INTELIGENTE (polling)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -227,15 +248,6 @@ wait_for_pid() {
     return 1
 }
 
-wait_for_file() {
-    local file="$1" timeout="${2:-30}"
-    for i in $(seq 1 "$timeout"); do
-        [ -f "$file" ] && return 0
-        sleep 1
-    done
-    return 1
-}
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MATAR SOLO PROCESOS DE EARNAPP (seguro)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -245,7 +257,7 @@ kill_earnapp_procs() {
     for pid in $(pgrep -f "/usr/bin/earnapp" 2>/dev/null || true); do
         kill "$pid" 2>/dev/null && killed=$((killed + 1))
     done
-    for pid in $(pgrep -f "earnapp_agent.py" 2>/dev/null || true); do
+    for pid in $(pgrep -f "earnapp_upgrader" 2>/dev/null || true); do
         kill "$pid" 2>/dev/null && killed=$((killed + 1))
     done
     sleep 2
@@ -253,10 +265,115 @@ kill_earnapp_procs() {
     for pid in $(pgrep -f "/usr/bin/earnapp" 2>/dev/null || true); do
         kill -9 "$pid" 2>/dev/null || true
     done
-    for pid in $(pgrep -f "earnapp_agent.py" 2>/dev/null || true); do
+    for pid in $(pgrep -f "earnapp_upgrader" 2>/dev/null || true); do
         kill -9 "$pid" 2>/dev/null || true
     done
     return "$killed"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  BLINDAJE DEL SERVICIO (Restart=always)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ensure_service_robust() {
+    local unit="/etc/systemd/system/earnapp.service"
+    if [ -f "$unit" ]; then
+        log info "Blindando servicio earnapp (Restart=always)..."
+        mkdir -p /etc/systemd/system/earnapp.service.d
+        cat > /etc/systemd/system/earnapp.service.d/override.conf << 'EOF'
+[Service]
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+EOF
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart earnapp 2>/dev/null || true
+        log ok "Servicio blindado (Restart=always, sin límite de reintentos)"
+    else
+        log warn "Unit earnapp.service no encontrado — se blindará en el siguiente watchdog"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  WATCHDOG (timer systemd cada 7 días)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+install_watchdog() {
+    log info "Instalando watchdog systemd (cada $UPDATE_INTERVAL días)..."
+    mkdir -p /usr/local/bin
+
+    # Copia local del script (la usa el watchdog; se auto-actualiza vía self_update)
+    curl -fsSL --connect-timeout 15 --max-time 60 "$GITHUB_RAW_URL" -o "$INSTALLED_COPY" 2>/dev/null || true
+    chmod +x "$INSTALLED_COPY" 2>/dev/null || true
+
+    # Servicio oneshot que ejecuta el script en modo watchdog
+    cat > "/etc/systemd/system/$WATCHDOG_SERVICE" << EOF
+[Unit]
+Description=EarnApp Watchdog — verifica y repara el nodo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '$INSTALLED_COPY --watchdog >> $LOG_FILE 2>&1'
+EOF
+
+    # Timer: arranca 10min tras boot y luego cada UPDATE_INTERVAL días
+    cat > "/etc/systemd/system/$WATCHDOG_TIMER" << EOF
+[Unit]
+Description=EarnApp Watchdog Timer (cada $UPDATE_INTERVAL días)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=${UPDATE_INTERVAL}d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable "$WATCHDOG_TIMER" 2>/dev/null || true
+    systemctl start "$WATCHDOG_TIMER" 2>/dev/null || true
+    # Primer chequeo inmediato
+    systemctl start "$WATCHDOG_SERVICE" 2>/dev/null || true
+    log ok "Watchdog programado (primer chequeo en ~10min, luego cada ${UPDATE_INTERVAL}d)"
+}
+
+do_watchdog() {
+    require_root
+    log info "Watchdog: verificando estado de EarnApp..."
+
+    local restarted=false
+    for svc in earnapp earnapp_upgrader; do
+        if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
+            log warn "Servicio $svc caído — re-arrancando..."
+            systemctl start "$svc" 2>/dev/null || true
+            restarted=true
+        fi
+    done
+
+    if [ "$restarted" = true ]; then
+        log ok "Servicios re-arrancados"
+        sleep 3
+    else
+        log ok "Servicios operativos"
+    fi
+
+    # Blindaje por si el instalador no lo dejó agresivo
+    ensure_service_robust
+
+    # Refrescar link
+    local link
+    link=$(get_earnapp_link)
+    if [ -n "$link" ]; then
+        echo "$link" > "$LINK_FILE" 2>/dev/null || true
+        log ok "Link vigente: $link"
+    fi
+
+    write_version_file
+    log ok "Watchdog completado — nodo operativo"
+    exit 0
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -273,17 +390,21 @@ do_uninstall() {
     require_root
 
     log info "Deteniendo servicios..."
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl stop "$WATCHDOG_TIMER" "$WATCHDOG_SERVICE" 2>/dev/null || true
+    systemctl disable "$WATCHDOG_TIMER" 2>/dev/null || true
     systemctl stop earnapp 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    systemctl stop earnapp_upgrader 2>/dev/null || true
     systemctl disable earnapp 2>/dev/null || true
+    systemctl disable earnapp_upgrader 2>/dev/null || true
 
     log info "Matando procesos..."
     kill_earnapp_procs
 
     log info "Eliminando archivos..."
     rm -f /etc/systemd/system/earnapp*.service
-    rm -rf "$AGENT_DEST" "$CONFIG_FILE" "$VERSION_FILE" /var/log/earnapp_agent.log* /tmp/earnapp*.txt
+    rm -f /etc/systemd/system/earnapp*.timer
+    rm -rf /etc/systemd/system/earnapp.service.d
+    rm -rf "$VERSION_FILE" "$INSTALLED_COPY" "$LOG_FILE" /tmp/earnapp*.txt /tmp/ea_install.log
     systemctl daemon-reload 2>/dev/null || true
 
     # Desinstalar earnapp oficial si existe
@@ -327,14 +448,51 @@ download_verify() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  CAPTURA DEL LINK DE ACTIVACIÓN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+get_earnapp_link() {
+    local link=""
+
+    # 1) Config persistente (reinstalación conserva el nodo)
+    [ -f /etc/earnapp/config ] && \
+        link=$(grep -oP 'https://earnapp\.com/r/[a-zA-Z0-9_\-]+' /etc/earnapp/config 2>/dev/null | head -1)
+
+    # 2) Log del instalador (instalación nueva)
+    [ -z "$link" ] && [ -f /tmp/ea_install.log ] && \
+        link=$(grep -oP 'https://earnapp\.com/r/[a-zA-Z0-9_\-]+' /tmp/ea_install.log 2>/dev/null | head -1)
+
+    # 3) Preguntar al binario (varias formas, por si alguna lo muestra)
+    if [ -z "$link" ] && [ -x /usr/bin/earnapp ]; then
+        for cmd in "status" "--status" "daemon status"; do
+            link=$(timeout 10 /usr/bin/earnapp $cmd 2>/dev/null \
+                | grep -oP 'https://earnapp\.com/r/[a-zA-Z0-9_\-]+' | head -1 || true)
+            [ -n "$link" ] && break
+        done
+    fi
+
+    # 4) Polling: el daemon puede tardar en generar el link al primer arranque
+    if [ -z "$link" ]; then
+        log info "Esperando a que el daemon genere el link..."
+        for i in $(seq 1 15); do
+            [ -f /etc/earnapp/config ] && \
+                link=$(grep -oP 'https://earnapp\.com/r/[a-zA-Z0-9_\-]+' /etc/earnapp/config 2>/dev/null | head -1)
+            [ -n "$link" ] && break
+            sleep 2
+        done
+    fi
+
+    echo "$link"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  INSTALACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 do_install() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║     EarnApp Panel — Instalador v5       ║${NC}"
-    echo -e "${CYAN}║     Panel: $PANEL_URL${NC}"
+    echo -e "${CYAN}║        EarnApp — Instalador v5.2.0       ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -343,39 +501,35 @@ do_install() {
     # ─── PASO 1: LIMPIAR ───
     echo -e "\n${BOLD}[1/5]${NC} ${YELLOW}Limpiando instalación anterior...${NC}"
 
-    # Solo detener servicios previos
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl stop "$WATCHDOG_TIMER" "$WATCHDOG_SERVICE" 2>/dev/null || true
+    systemctl disable "$WATCHDOG_TIMER" 2>/dev/null || true
     systemctl stop earnapp 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    systemctl stop earnapp_upgrader 2>/dev/null || true
     systemctl disable earnapp 2>/dev/null || true
+    systemctl disable earnapp_upgrader 2>/dev/null || true
 
     kill_earnapp_procs || true
     sleep 1
 
     rm -f /etc/systemd/system/earnapp*.service 2>/dev/null || true
+    rm -f /etc/systemd/system/earnapp*.timer 2>/dev/null || true
+    rm -rf /etc/systemd/system/earnapp.service.d 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     log ok "Limpieza completada"
 
-    # ─── PASO 2: DEPENDENCIAS ───
-    echo -e "\n${BOLD}[2/5]${NC} ${YELLOW}Instalando dependencias...${NC}"
+    # ─── PASO 2: VERIFICAR (herramientas + conectividad) ───
+    echo -e "\n${BOLD}[2/5]${NC} ${YELLOW}Verificando entorno...${NC}"
 
-    if ! command -v python3 &>/dev/null; then
-        log info "Python3 no encontrado, instalando..."
+    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+        log info "curl/wget no encontrado, instalando curl..."
         update_pkg_index
-        if ! install_pkg python3; then
-            fail "No se pudo instalar python3. Instálalo manualmente y reintenta."
+        if ! install_pkg curl; then
+            fail "No se pudo instalar curl. Instálalo manualmente y reintenta."
         fi
     fi
 
-    # pip + requests
-    if ! python3 -c "import requests" 2>/dev/null; then
-        log info "Instalando requests..."
-        python3 -m pip install requests -q 2>/dev/null \
-            || python3 -m pip install requests --break-system-packages -q 2>/dev/null \
-            || log warn "No se pudo instalar requests (se instalará más tarde)"
-    fi
-
-    log ok "Dependencias listas"
+    check_connectivity
+    log ok "Entorno listo"
 
     # ─── PASO 3: INSTALAR EARNAPP OFICIAL ───
     echo -e "\n${BOLD}[3/5]${NC} ${YELLOW}Instalando EarnApp oficial...${NC}"
@@ -390,19 +544,13 @@ do_install() {
             fail "No se pudo descargar el instalador oficial de EarnApp"
         fi
 
-        log info "Ejecutando instalador oficial..."
-
-        # El instalador oficial de earnapp es interactivo
-        # Enviamos "yes" a las preguntas usando un enfoque controlado
-        # Redirigir a expect-like para evitar sleeps hardcodeados
-        {
-            echo "yes"
-            sleep 2
-            echo "yes"
-        } | bash "$TEMP_DIR/install.sh" > /tmp/ea_install.log 2>&1 &
+        log info "Ejecutando instalador oficial (-y auto)..."
+        # -y activa el modo automático del instalador oficial (AUTO=1),
+        # evita preguntas interactivas y el binario queda en /usr/bin/earnapp
+        bash "$TEMP_DIR/install.sh" -y > /tmp/ea_install.log 2>&1 &
         INSTALLER_PID=$!
 
-        # Esperar con timeout de 120s en vez de sleep 60
+        # Esperar con timeout de 120s
         if wait_for_pid "$INSTALLER_PID" 120 5; then
             log ok "Instalador finalizado"
         else
@@ -419,83 +567,32 @@ do_install() {
         fi
     fi
 
-    # ─── PASO 4: CAPTURAR LINK DE REFERRAL ───
-    echo -e "\n${BOLD}[4/5]${NC} ${YELLOW}Capturando link...${NC}"
-
-    LINK=""
-
-    # Buscar en el log del instalador
-    if [ -f /tmp/ea_install.log ]; then
-        LINK=$(grep -oP 'https://earnapp\.com/r/sdk-node-[a-zA-Z0-9]+' /tmp/ea_install.log 2>/dev/null | head -1)
+    # Asegurar que el servicio esté activo
+    if systemctl is-active --quiet earnapp 2>/dev/null; then
+        log ok "Servicio earnapp activo"
+    else
+        log info "Arrancando servicio earnapp..."
+        systemctl start earnapp 2>/dev/null || true
+        sleep 2
     fi
 
-    # Buscar en config de earnapp
-    if [ -z "$LINK" ] && [ -f /etc/earnapp/config ]; then
-        LINK=$(grep -oP 'https://earnapp\.com/r/sdk-node-[a-zA-Z0-9]+' /etc/earnapp/config 2>/dev/null | head -1)
-    fi
+    # ─── PASO 4: BLINDAR + WATCHDOG ───
+    echo -e "\n${BOLD}[4/5]${NC} ${YELLOW}Configurando persistencia (24/7)...${NC}"
+
+    ensure_service_robust
+    install_watchdog
+
+    # ─── PASO 5: CAPTURAR LINK DE ACTIVACIÓN ───
+    echo -e "\n${BOLD}[5/5]${NC} ${YELLOW}Obteniendo link de activación...${NC}"
+
+    LINK=$(get_earnapp_link)
 
     if [ -n "$LINK" ]; then
         echo "$LINK" > "$LINK_FILE"
-        log ok "Link capturado: ${CYAN}$LINK${NC}"
+        log ok "Link obtenido"
     else
-        log warn "Link no encontrado en logs. Se detectará automáticamente al conectar."
-        log info "Puedes verificarlo luego con: cat $LINK_FILE"
-    fi
-
-    # ─── PASO 5: INSTALAR AGENTE PYTHON ───
-    echo -e "\n${BOLD}[5/5]${NC} ${YELLOW}Instalando agente...${NC}"
-
-    if ! download_verify "$AGENT_URL" "$AGENT_DEST" "$AGENT_EXPECTED_HASH"; then
-        fail "No se pudo descargar el agente desde $AGENT_URL"
-    fi
-    chmod +x "$AGENT_DEST"
-
-    # Validar sintaxis Python
-    if ! python3 -c "import ast; ast.parse(open('${AGENT_DEST}').read())" 2>/dev/null; then
-        rm -f "$AGENT_DEST"
-        fail "El agente descargado no es un Python válido"
-    fi
-    log ok "Agente validado (sintaxis correcta)"
-
-    # Crear servicio systemd
-    cat > "/etc/systemd/system/${SERVICE_NAME}.service" << 'SERVICE'
-[Unit]
-Description=EarnApp Panel Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/tmp
-ExecStart=/usr/bin/python3 /usr/local/bin/earnapp_agent.py
-Restart=always
-RestartSec=15
-StandardOutput=journal
-StandardError=journal
-Environment="PYTHONUNBUFFERED=1"
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-    systemctl start "$SERVICE_NAME"
-
-    # Verificar con polling
-    for i in 1 2 3; do
-        if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-            log ok "Servicio iniciado"
-            break
-        fi
-        sleep 1
-    done
-
-    if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        log err "El agente no inició. Últimas líneas del log:"
-        journalctl -u "$SERVICE_NAME" -n 5 --no-pager 2>/dev/null || true
-        exit 1
+        log warn "Link aún no disponible. Verifícalo luego con: /usr/bin/earnapp status"
+        log info "O revisa tu cuenta en earnapp.com"
     fi
 
     # Refrescar marker de versión instalada
@@ -510,19 +607,25 @@ SERVICE
     echo "  EarnApp:"
     echo "    Estado: $(systemctl is-active earnapp 2>/dev/null || echo '?')"
     echo "    Versión: $(/usr/bin/earnapp --version 2>/dev/null | head -1 || echo '?')"
-    echo ""
-    echo "  Agente:"
-    echo "    Estado: $(systemctl is-active ${SERVICE_NAME} 2>/dev/null || echo '?')"
-    echo "    PID:    $(systemctl show -p MainPID -v ${SERVICE_NAME} 2>/dev/null | cut -d= -f2 || echo '?')"
-    echo "    Config: $CONFIG_FILE"
+    echo "    Watchdog: $(systemctl is-active $WATCHDOG_TIMER 2>/dev/null || echo '?')"
     echo ""
 
-    if [ -f "$LINK_FILE" ]; then
-        echo -e "  Link: ${CYAN}$(cat "$LINK_FILE")${NC}"
+    if [ -n "$LINK" ]; then
+        echo -e "  ${YELLOW}╔══════════════════════════════════════════════╗${NC}"
+        echo -e "  ${YELLOW}║   ACTIVA TU NODO EN EARNAPP.COM CON ESTE LINK ║${NC}"
+        echo -e "  ${YELLOW}╚══════════════════════════════════════════════╝${NC}"
         echo ""
+        echo -e "  ${CYAN}$LINK${NC}"
+        echo ""
+        echo "  Abre este enlace, inicia sesión o crea tu cuenta,"
+        echo "  y el nodo quedará vinculado automáticamente."
     fi
 
-    echo -e "  ${YELLOW}En 60 segundos aparecerá en el panel${NC}"
+    echo ""
+    echo -e "  ${YELLOW}💡 Para maximizar ganancias: ajusta el % de ancho de banda${NC}"
+    echo -e "  ${YELLOW}   compartido en el panel de earnapp.com.${NC}"
+    echo ""
+    echo "  El nodo queda corriendo 24/7 y se repara solo cada 7 días (watchdog)."
     echo "--------------------------------------------------------------------"
     echo ""
 }
@@ -537,24 +640,25 @@ for arg in "$@"; do
         --force)        FORCE_MODE=true ;;
         --skip-update)  SKIP_UPDATE=true ;;
         --force-update) FORCE_UPDATE=true ;;
+        --watchdog)     WATCHDOG_MODE=true ;;
         --version|-V)
-            echo "EarnApp Panel Installer v$SCRIPT_VERSION"
+            echo "EarnApp Installer v$SCRIPT_VERSION"
             exit 0
             ;;
         --help|-h)
-            echo "Uso: curl -s http://181.206.125.11:8090/panel/install_agent.sh | bash [--] [opciones]"
+            echo "Uso: curl -s https://raw.githubusercontent.com/CyberRo/HauntKit/main/tools/utils/earnapp-install.sh | bash [--] [opciones]"
             echo ""
             echo "Opciones:"
             echo "  --uninstall     Desinstalar completa"
             echo "  --force         Reinstalar aunque ya exista"
             echo "  --skip-update   Saltar la verificación de actualizaciones"
             echo "  --force-update  Forzar verificación aunque esté reciente"
+            echo "  --watchdog      Modo interno del timer (verifica y repara el nodo)"
             echo "  --version       Mostrar versión del instalador"
             echo ""
             echo "Variables de entorno:"
-            echo "  PANEL_URL       URL del panel (defecto: http://95.111.231.63:8090/panel)"
-            echo "  AGENT_URL       URL del agente Python (defecto: http://95.111.231.63:8090/earnapp_agent.py)"
-            echo "  UPDATE_INTERVAL Días entre revisiones de auto-update (defecto: 7)"
+            echo "  EARNINSTALL_URL URL del instalador oficial de EarnApp"
+            echo "  UPDATE_INTERVAL Días entre revisiones de auto-update y watchdog (defecto: 7)"
             echo "  GITHUB_RAW_URL  URL raw del instalador en GitHub"
             exit 0
             ;;
@@ -570,6 +674,10 @@ self_update
 
 if $UNINSTALL_MODE; then
     do_uninstall
+fi
+
+if $WATCHDOG_MODE; then
+    do_watchdog
 fi
 
 do_install
