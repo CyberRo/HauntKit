@@ -76,47 +76,82 @@ if [ ! -f "$CONFIG_SRC" ]; then
     [ -f "$CONFIG_EXAMPLE" ] && CONFIG_SRC="$CONFIG_EXAMPLE"
 fi
 
-# Merge: ejemplo como base + preservar claves personalizadas del .env actual
+# Merge: ejemplo como base + preservar personalizaciones del .env local
+# ─────────────────────────────────────────────────────────────────────────
+#  Reglas de sincronización (snapshot .env.defaults):
+#   • AL INSTALAR: se copia el ejemplo → .env y se guarda un snapshot
+#     (.env.defaults = defaults que el repo envía en ese momento).
+#   • EN UPDATE (con snapshot .env.defaults):
+#       · valor local == snapshot  → el usuario NO lo tocó
+#                                   → toma el default NUEVO del repo
+#       · valor local != snapshot  → el usuario lo personalizó
+#                                   → se conserva el valor local
+#       · clave nueva del repo que no existe en local → default del repo
+#       · clave local extra (no existe en el repo)    → se conserva
+#   • EN UPDATE (SIN snapshot — servidores viejos): se toma la config del
+#     repo; excepción: WALLET_BASE personalizada se conserva.
+#   • Tras el merge, el snapshot se actualiza a los defaults actuales del
+#     repo (para comparar correctamente en el próximo update).
+# ─────────────────────────────────────────────────────────────────────────
 merge_config() {
-    local src="$1" dst="$2" tmp
+    local src="$1" dst="$2" tmp snapshot
     tmp="${dst}.tmp"
-    local ex_wallet loc_wallet
+    snapshot="${dst}.defaults"
+    local key val prev_val loc_wallet ex_wallet
 
-    # Wallet del ejemplo (para preservar el local si fue personalizado)
-    ex_wallet=$(grep -E '^WALLET_BASE=' "$src" 2>/dev/null | head -1 | cut -d= -f2-)
-    loc_wallet=$(grep -E '^WALLET_BASE=' "$dst" 2>/dev/null | head -1 | cut -d= -f2-)
+    # Base = ejemplo del repo (defaults nuevos + claves nuevas)
+    cp "$src" "$tmp"
 
-    # Base = ejemplo (trae los defaults nuevos)
-    cat "$src" > "$tmp"
-
-    # Preservar claves locales que no existan en el ejemplo (personalizaciones)
-    while IFS='=' read -r key val; do
-        [ -z "$key" ] && continue
-        case "$key" in
-            \#*|'') continue ;;
-        esac
-        # No duplicar claves ya presentes en el ejemplo
-        if grep -qE "^${key}=" "$src"; then
-            # WALLET_BASE: preservar el local si difiere del ejemplo
-            if [ "$key" = "WALLET_BASE" ] && [ -n "$loc_wallet" ] && [ "$loc_wallet" != "$ex_wallet" ]; then
-                echo "WALLET_BASE=$loc_wallet" >> "$tmp"
+    if [ -f "$snapshot" ]; then
+        # ─── CON snapshot: detectar qué personalizó el usuario ───
+        while IFS='=' read -r key val; do
+            [ -z "$key" ] && continue
+            case "$key" in
+                \#*|'') continue ;;
+            esac
+            # Valor que el repo envió la última vez (snapshot)
+            prev_val=$(grep -E "^${key}=" "$snapshot" 2>/dev/null | head -1 | cut -d= -f2-)
+            if grep -qE "^${key}=" "$tmp"; then
+                # Clave existe en el repo: ¿la personalizó el usuario?
+                if [ -n "$prev_val" ] && [ "$prev_val" = "$val" ]; then
+                    : # No la tocó → se queda el default NUEVO del repo (ya está en $tmp)
+                else
+                    # La personalizó (o no había snapshot previo) → conservar local
+                    sed -i "s|^${key}=.*|${key}=${val}|" "$tmp"
+                fi
+            else
+                # Clave extra local (no existe en el repo) → conservarla
+                echo "${key}=${val}" >> "$tmp"
             fi
-            continue
+        done < "$dst"
+    else
+        # ─── SIN snapshot (servidor viejo): tomar config del repo ───
+        # Excepción: WALLET_BASE personalizada se conserva
+        if [ -f "$dst" ]; then
+            loc_wallet=$(grep -E '^WALLET_BASE=' "$dst" 2>/dev/null | head -1 | cut -d= -f2-)
+            ex_wallet=$(grep -E '^WALLET_BASE=' "$src" 2>/dev/null | head -1 | cut -d= -f2-)
+            if [ -n "$loc_wallet" ] && [ "$loc_wallet" != "$ex_wallet" ]; then
+                sed -i "s|^WALLET_BASE=.*|WALLET_BASE=${loc_wallet}|" "$tmp"
+            fi
         fi
-        # Clave local sin equivalente en el ejemplo → conservarla
-        echo "${key}=${val}" >> "$tmp"
-    done < "$dst"
+    fi
 
     mv "$tmp" "$dst"
     chmod 600 "$dst"
     chown root:root "$dst"
+
+    # Actualizar snapshot con los defaults actuales del repo
+    cp "$src" "$snapshot"
+    chmod 600 "$snapshot"
+    chown root:root "$snapshot"
 }
 
 if [ -f "$CONFIG_SRC" ]; then
     if [ ! -f "$CONFIG_DST" ]; then
         cp "$CONFIG_SRC" "$CONFIG_DST"
-        chmod 600 "$CONFIG_DST"
-        chown root:root "$CONFIG_DST"
+        cp "$CONFIG_SRC" "$CONFIG_DST.defaults"   # snapshot inicial
+        chmod 600 "$CONFIG_DST" "$CONFIG_DST.defaults"
+        chown root:root "$CONFIG_DST" "$CONFIG_DST.defaults"
         if $UPDATE_MODE; then
             echo -e "${YELLOW}[*] Config no existía, instalada desde el repo${NC}"
         else
