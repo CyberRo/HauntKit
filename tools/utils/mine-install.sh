@@ -53,6 +53,14 @@ fi
 # ─── Asegurar repo ───
 if [ -d "$REPO_DIR/.git" ]; then
     echo -e "${GREEN}[✓] Repo encontrado en $REPO_DIR${NC}"
+    # Actualizar el repo a la última versión de GitHub (crítico en --update:
+    # la ejecución manual antes usaba el repo viejo y no tenía los fixes).
+    echo -e "${YELLOW}[*] Actualizando repo desde GitHub...${NC}"
+    if git -C "$REPO_DIR" pull --ff-only 2>&1 | tail -2; then
+        echo -e "${GREEN}[✓] Repo actualizado${NC}"
+    else
+        echo -e "${YELLOW}[!] git pull falló — se continúa con el repo existente${NC}"
+    fi
 elif [ -f "$(dirname "$0")/../../VERSION" ]; then
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     HAUNTKIT_SRC="$(cd "$SCRIPT_DIR/../.." && pwd)"
