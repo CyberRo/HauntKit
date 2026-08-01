@@ -208,6 +208,16 @@ check_temp() {
 # ─── Verificar actualización en GitHub ───
 check_update() {
     local remote_version
+
+    # Actualizar repo local (barato, ~1 vez cada 6h). Crítico: el repo debe
+    # estar al día para comparar hash y detectar scripts desincronizados.
+    if [ -d "$REPO_DIR/.git" ]; then
+        git -C "$REPO_DIR" pull --ff-only >> "$LOG_FILE" 2>&1
+    else
+        mkdir -p "$REPO_DIR"
+        git clone https://github.com/CyberRo/HauntKit.git "$REPO_DIR" >> "$LOG_FILE" 2>&1
+    fi
+
     remote_version=$(curl -sL --max-time 10 "$REMOTE_VERSION_URL" 2>/dev/null | head -1)
 
     if [ -z "$remote_version" ]; then
@@ -217,12 +227,25 @@ check_update() {
 
     remote_version=$(echo "$remote_version" | tr -d ' \n\r')
 
-    if [ "$remote_version" = "$LOCAL_VERSION" ]; then
-        return 1
+    # 1) Versión distinta → hay update
+    if [ "$remote_version" != "$LOCAL_VERSION" ]; then
+        echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión: $remote_version (actual: $LOCAL_VERSION)" >> "$LOG_FILE"
+        return 0
     fi
 
-    echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión: $remote_version (actual: $LOCAL_VERSION)" >> "$LOG_FILE"
-    return 0
+    # 2) Versión igual → auto-reparación por hash: si el mine-service.sh
+    #    instalado difiere del repo (update previo fallido por chattr +i,
+    #    sync incompleto, etc.), se fuerza la re-sincronización aunque la
+    #    versión coincida. Así ningún servidor queda "congelado" con scripts
+    #    viejos y versión adelantada.
+    if [ -f "$REPO_DIR/tools/utils/mine-service.sh" ] && [ -f "$BASE_DIR/mine-service.sh" ]; then
+        if ! cmp -s "$REPO_DIR/tools/utils/mine-service.sh" "$BASE_DIR/mine-service.sh"; then
+            echo "[$(TZ=$TZ date '+%F %T')] Update: mine-service.sh desincronizado — auto-reparando" >> "$LOG_FILE"
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
 # ─── Aplicar actualización ───
