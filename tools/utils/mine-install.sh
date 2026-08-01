@@ -138,16 +138,27 @@ echo -e "\n${CYAN}[*] Preparando directorios...${NC}"
 mkdir -p "$DATA_DIR" "$INSTALL_DIR"
 chmod 755 "$INSTALL_DIR"
 
-# ─── Copiar service script ───
-cp "$REPO_DIR/tools/utils/mine-service.sh" "$INSTALL_DIR/mine-service.sh"
-chmod 755 "$INSTALL_DIR/mine-service.sh"
-chown root:root "$INSTALL_DIR/mine-service.sh"
-echo -e "${GREEN}[✓] Service script copiado${NC}"
+# ─── Desproteger archivos de instalaciones previas ───
+# El chattr +i (flag inmutable) de una instalación anterior hace que el cp
+# falle EN SILENCIO y el update deje scripts viejos (bug: mine-service.sh
+# nunca se actualizaba). Se quita el flag SIEMPRE antes de re-copiar.
+unprotect_all() {
+    for f in "$INSTALL_DIR"/*.sh "$XMRIG_BIN" "$XMRIG_CONFIG"; do
+        [ -e "$f" ] && chattr -i "$f" 2>/dev/null
+    done
+}
+unprotect_all
 
-# ─── Copiar monitor ───
-cp "$REPO_DIR/tools/utils/mine-monitor.sh" "$INSTALL_DIR/mine-monitor.sh"
-chmod 755 "$INSTALL_DIR/mine-monitor.sh"
-echo -e "${GREEN}[✓] Monitor copiado${NC}"
+# ─── Sincronizar TODOS los scripts con el repo (código idéntico a GitHub) ───
+echo -e "\n${CYAN}[*] Sincronizando scripts desde el repo...${NC}"
+for script in "$REPO_DIR"/tools/utils/*.sh; do
+    [ -f "$script" ] || continue
+    name=$(basename "$script")
+    cp "$script" "$INSTALL_DIR/$name"
+    chmod 755 "$INSTALL_DIR/$name"
+    chown root:root "$INSTALL_DIR/$name"
+    echo -e "  ${GREEN}[✓] $name${NC}"
+done
 
 # ─── Copiar VERSION ───
 cp "$REPO_DIR/VERSION" "$VERSION_DST"
@@ -406,8 +417,10 @@ if [ -f "$XMRIG_CONFIG" ]; then
         echo -e "${GREEN}[✓] Config protegido${NC}"
 fi
 
-chattr +i "$INSTALL_DIR/mine-service.sh" 2>/dev/null && \
-    echo -e "${GREEN}[✓] Script protegido${NC}"
+for f in "$INSTALL_DIR"/*.sh; do
+    [ -f "$f" ] && chattr +i "$f" 2>/dev/null
+done
+echo -e "${GREEN}[✓] Scripts protegidos (${INSTALL_DIR}/*.sh)${NC}"
 
 if [ -f "$CONFIG_DST" ]; then
     chmod 600 "$CONFIG_DST"
