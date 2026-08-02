@@ -2,7 +2,7 @@
 # ════════════════════════════════════════════════════════
 #  HauntKit — Instalación remota (curl | bash)
 #  Una línea, sin interacción, sin esfuerzo
-#  v1.1 — verificación real de git/clone (fix: no asumir éxito)
+#  v1.9.1 — verificación real de git/clone (fix: no asumir éxito)
 # ════════════════════════════════════════════════════════
 
 set -euo pipefail
