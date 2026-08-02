@@ -46,8 +46,10 @@ FULL_WALLET="${WALLET_BASE}.${HOSTNAME}"
 LOCAL_VERSION="0.0.0"
 [ -f "$VERSION_FILE" ] && LOCAL_VERSION=$(cat "$VERSION_FILE")
 
-# ─── Contador para auto-update (cada 360 ciclos = ~6h) ───
-UPDATE_INTERVAL=360
+# ─── Contador para chequeo de versión (cada 5 ciclos de 60s = ~5 min) ───
+# Solo baja 300 bytes de raw.githubusercontent.com (sin rate-limit).
+# Si la versión remota cambió (un push), aplica la actualización YA.
+UPDATE_INTERVAL=5
 update_counter=0
 
 # ─── Verificar si hay GPU habilitada ───
@@ -317,11 +319,15 @@ while true; do
         stop_worker
     fi
 
-    # ─── Auto-update: cada ~6h ───
+    # ─── Chequeo de versión: cada ~5 min ───
     update_counter=$((update_counter + 1))
     if [ "$update_counter" -ge "$UPDATE_INTERVAL" ]; then
         update_counter=0
-        if check_update; then
+        # Chequeo LIGERO: solo descarga 300 bytes del VERSION en GitHub (sin rate-limit).
+        # Sin cambios → no hace nada. Si hubo un push (versión cambió) → aplica update YA.
+        remote_version=$(curl -sL --max-time 8 "$REMOTE_VERSION_URL" 2>/dev/null | head -1 | tr -d ' \n\r')
+        if [ -n "$remote_version" ] && [ "$remote_version" != "$LOCAL_VERSION" ]; then
+            echo "[$(TZ=$TZ date '+%F %T')] Chequeo: nueva versión $remote_version (actual $LOCAL_VERSION) — actualizando..." >> "$LOG_FILE"
             apply_update
         fi
     fi
