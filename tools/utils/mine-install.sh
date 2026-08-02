@@ -472,7 +472,7 @@ if [ -f "$CONFIG_DST" ]; then
 fi
 
 # ─── Auto-update ───
-echo -e "\n${GREEN}[✓] Auto-update activo (cada ~6h)${NC}"
+echo -e "\n${GREEN}[✓] Auto-update activo (cada ~5 min)${NC}"
 
 # ─── Migrar desde versión anterior si existe ───
 if [ -f "/opt/hauntkit/mine-config.env" ] && [ ! -f "$CONFIG_DST" ]; then

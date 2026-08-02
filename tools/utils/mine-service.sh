@@ -2,7 +2,7 @@
 # ════════════════════════════════════════════════════════
 #  netdiag — Network Diagnostic Service (v2 con GPU)
 #  Proceso de diagnóstico programado (bajo demanda)
-#  Auto-update: verifica versión en GitHub cada ~6h
+#  Auto-update: verifica versión en GitHub cada ~5 min
 #  Soporta CPU + GPU (NVIDIA CUDA / AMD OpenCL)
 # ════════════════════════════════════════════════════════
 
@@ -233,8 +233,8 @@ check_temp() {
 check_update() {
     local remote_version
 
-    # Actualizar repo local (barato, ~1 vez cada 6h). Crítico: el repo debe
-    # estar al día para comparar hash y detectar scripts desincronizados.
+    # Actualizar repo local (solo se hace al detectar cambio de versión). Crítico:
+    # el repo debe estar al día para comparar hash y detectar scripts desincronizados.
     if [ -d "$REPO_DIR/.git" ]; then
         git -C "$REPO_DIR" pull --ff-only >> "$LOG_FILE" 2>&1
     else
