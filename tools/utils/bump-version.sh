@@ -14,13 +14,13 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
 # ─── Validar argumento ───
 NEW_VERSION="${1:-}"
 if [ -z "$NEW_VERSION" ]; then
-    echo -e "${RED}[!] Uso: $0 <version>   (ej. 1.9.4)${NC}"
+    echo -e "${RED}[!] Uso: $0 <version>   (ej. 1.9.5)${NC}"
     exit 1
 fi
 
 # ─── Validar formato de versión (x.y.z) ───
 if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-    echo -e "${RED}[!] Versión inválida '$NEW_VERSION'. Debe ser MAJOR.MINOR.PATCH (ej. 1.9.4)${NC}"
+    echo -e "${RED}[!] Versión inválida '$NEW_VERSION'. Debe ser MAJOR.MINOR.PATCH (ej. 1.9.5)${NC}"
     exit 1
 fi
 
@@ -49,9 +49,9 @@ UPDATED=0
 while IFS= read -r file; do
     # sólo si menciona la versión actual en alguna cabecera
     if grep -qE "(v?)$CURRENT" "$file" 2>/dev/null; then
-        # Reemplaza 'v<VERSION>' (ej. v1.9.0 -> v1.9.4)
+        # Reemplaza 'v<VERSION>' (ej. v1.9.0 -> v1.9.5)
         sed -i -E "s/v${CURRENT}/v${NEW_VERSION}/g" "$file" 2>/dev/null
-        # Reemplaza '<VERSION>' sin prefijo (ej. 1.9.0 -> 1.9.4), pero no el VERSION propio
+        # Reemplaza '<VERSION>' sin prefijo (ej. 1.9.0 -> 1.9.5), pero no el VERSION propio
         sed -i -E "s/(^|[^.0-9])${CURRENT}([^.0-9]|$)/\1${NEW_VERSION}\2/g" "$file" 2>/dev/null
         echo -e "  ${GREEN}✓${NC} $file → $NEW_VERSION"
         UPDATED=$((UPDATED + 1))

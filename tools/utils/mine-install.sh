@@ -551,7 +551,7 @@ if ! $UPDATE_MODE; then
     fi
 
     systemctl enable $SERVICE_NAME >/dev/null 2>&1
-    systemctl start $SERVICE_NAME 2>/dev/null
+    systemctl restart $SERVICE_NAME 2>/dev/null
 
     if $IN_WINDOW; then
         echo -e "${GREEN}[✓] En horario de minado ($CUR_TIME) — worker iniciado de inmediato${NC}"
