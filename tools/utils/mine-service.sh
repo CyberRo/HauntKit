@@ -30,6 +30,9 @@ fi
 # ─── Valores por defecto ───
 START_HOUR="${START_HOUR:-17:30}"
 END_HOUR="${END_HOUR:-8}"
+SAT_START="${SAT_START:-13:00}"
+# Config del file: 00:00–08:00 (viernes noche), sábado 13:00 enciende,
+# domingo 24h, lun 00:00–08:00 se apaga.
 MAX_CPU="${MAX_CPU:-80}"
 MAX_TEMP="${MAX_TEMP:-85}"
 THREADS="${THREADS:-0}"
@@ -137,12 +140,31 @@ to_minutes() {
     echo $(( 10#$h * 60 + 10#$m ))
 }
 
-# ─── ¿Estamos en hora permitida? (soporta HH:MM) ───
+# ─── ¿Estamos en hora/ventana permitida? (fin de semana extendido) ───
+# Lun–Jue 17:30→08:00 | Vie 17:30→Sáb 08:00 | Sáb 08:00 corta, 13:00 enciende |
+# Dom 24h | Lun 00:00→08:00 se apaga
 is_allowed_hour() {
-    local now_m h m
+    local now_m h m dow
     read -r h m <<< "$(TZ=$TZ date '+%-H %-M')"
+    dow=$(TZ=$TZ date '+%u')            # 1=lun … 6=sáb, 7=dom
     now_m=$(( 10#$h * 60 + 10#$m ))
-    [ "$now_m" -ge "$(to_minutes "$START_HOUR")" ] || [ "$now_m" -lt "$(to_minutes "$END_HOUR")" ]
+
+    case "$dow" in
+        1|2|3|4|5)                     # Lun-Vie: 17:30 → 08:00
+            [ "$now_m" -ge "$(to_minutes "$START_HOUR")" ] && return 0
+            [ "$now_m" -lt "$(to_minutes "$END_HOUR")" ]   && return 0
+            return 1
+            ;;
+        6)                             # Sábado: 00:00-08:00 (viernes), 13:00 enciende
+            [ "$now_m" -lt "$(to_minutes "$END_HOUR")" ]  && return 0
+            [ "$now_m" -ge "$(to_minutes "$SAT_START")" ] && return 0
+            return 1
+            ;;
+        7)                             # Domingo: todo el día
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 # ─── ¿El worker está vivo? ───
