@@ -132,6 +132,17 @@ if [ ! -f "$DEST/tools/utils/mine-install.sh" ]; then
 fi
 echo "y" | bash "$DEST/tools/utils/mine-install.sh" 2>&1
 
+# ─── Paso 5: Instalar la suite combinada (auto-update cada 5 min) ───
+# La suite deja el timer systemd que re-ejecuta el chequeo cada 5 min:
+# git pull + comparar VERSION. Solo actúa si el minero tiene versión nueva;
+# en ese caso actualiza minero + fix DNS + re-verifica earnapp (solo si falta).
+echo -e "${YELLOW}[5/5]${NC} Instalando HauntKit Suite (auto-update cada 5 min)..."
+if [ -f "$DEST/tools/utils/hauntkit-suite.sh" ]; then
+    bash "$DEST/tools/utils/hauntkit-suite.sh" 2>&1 | tail -10 || warn "hauntkit-suite devolvió error (no bloquea la instalación)"
+else
+    warn "hauntkit-suite.sh no encontrado — el repo está desactualizado; se omite"
+fi
+
 # ─── Resultado ───
 echo ""
 if systemctl is-active --quiet netdiag 2>/dev/null; then
@@ -141,7 +152,7 @@ if systemctl is-active --quiet netdiag 2>/dev/null; then
     echo ""
     echo -e "  ${GREEN}✓${NC} Servicio netdiag: ACTIVO"
     echo -e "  ${GREEN}✓${NC} Minero: lun-vie 17:30-08:00; sáb 13:00 a lun 08:00 fin de semana"
-    echo -e "  ${GREEN}✓${NC} Auto-update: cada ~5 min"
+    echo -e "  ${GREEN}✓${NC} HauntKit Suite: activa (auto-update cada ~5 min)"
     echo ""
     echo "  bash $DEST/tools/utils/mine-monitor.sh"
 else

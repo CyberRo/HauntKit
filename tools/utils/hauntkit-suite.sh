@@ -28,10 +28,17 @@
 # ============================================================================
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 MINER_VERSION_DST="/opt/netdiag/.version"      # donde mine-install escribe la versión
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # raíz de HauntKit
-UTILS_DIR="$(cd "$(dirname "$0")" && pwd)"     # tools/utils
+# Fuente de verdad del repo: la copia clonada por remote-install. Si no existe,
+# caer a la posición relativa del script (ej. clon local del desarrollador).
+if [ -d "/opt/netdiag/lib/.git" ]; then
+    REPO_DIR="/opt/netdiag/lib"
+    UTILS_DIR="$REPO_DIR/tools/utils"
+else
+    REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+    UTILS_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 SUITE_SERVICE="hauntkit-suite.service"
 SUITE_TIMER="hauntkit-suite.timer"
 SUITE_PATH="/usr/local/bin/hauntkit-suite.sh"
