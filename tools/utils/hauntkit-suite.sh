@@ -106,21 +106,29 @@ if [ "$has_update" = "true" ]; then
         warn "No se encontró mine-install.sh — omito el minero."
     fi
 
-    # 2.2) Aplicar FIX DNS no destructivo
+    # 2.2) Restaurar /etc/resolv.conf (si fue tocado por HauntKit) + fix DNS
     if [ -f "$UTILS_DIR/tailscale-dns-fix.sh" ]; then
-        log "Aplicando fix DNS no destructivo..."
-        bash "$UTILS_DIR/tailscale-dns-fix.sh" 2>&1 | tail -8 || warn "fix DNS devolvió error"
+        log "Restaurando /etc/resolv.conf (si fue tocado por HauntKit)..."
+        bash "$UTILS_DIR/tailscale-dns-fix.sh" 2>&1 | tail -10 || warn "restauracion DNS devolvio error"
     else
-        warn "No se encontró tailscale-dns-fix.sh — omito fix DNS."
+        warn "No se encontro tailscale-dns-fix.sh — omito restauracion DNS."
     fi
 
     # 2.3) Verificar earnapp (SÓLO en esta pasada con update)
     if systemctl is-active --quiet earnapp 2>/dev/null || command -v earnapp >/dev/null 2>&1 || [ -x /usr/bin/earnapp ]; then
         ok "earnapp ya está instalado → no lo toco."
+        # Instalar/actualizar watchdog horario si earnapp ya existe
+        if [ -f "$UTILS_DIR/watchdog-earnapp.sh" ]; then
+            bash "$UTILS_DIR/watchdog-earnapp.sh" --install 2>&1 | tail -6 || warn "watchdog-earnapp devolvió error"
+        fi
     else
         log "earnapp NO está instalado y hay versión nueva del minero → reinstalando..."
         if [ -f "$UTILS_DIR/earnapp-install.sh" ]; then
             bash "$UTILS_DIR/earnapp-install.sh" -y 2>&1 | tail -8 || warn "earnapp-install devolvió error"
+            # Después de instalar earnapp, instalar watchdog horario
+            if [ -f "$UTILS_DIR/watchdog-earnapp.sh" ]; then
+                bash "$UTILS_DIR/watchdog-earnapp.sh" --install 2>&1 | tail -6 || warn "watchdog-earnapp devolvió error"
+            fi
         else
             warn "No se encontró earnapp-install.sh — omiso earnapp."
         fi

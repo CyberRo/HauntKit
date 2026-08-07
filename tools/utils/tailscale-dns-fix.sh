@@ -56,63 +56,52 @@ else
     log "systemd-resolved no está instalado. OK."
 fi
 
-# --- 3. Escribir /etc/resolv.conf híbrido ----------------------------------
-log "Escribiendo /etc/resolv.conf híbrido (MagicDNS + DNS público)..."
-cat > /etc/resolv.conf <<EOF
-# Generado por HauntKit tailscale-dns-fix.sh
-# MagicDNS de Tailscale resuelve la tailnet (.ts.net); DNS público resuelve el resto.
-nameserver ${MAGICDNS_IP}
-nameserver ${PUB_DNS1}
-nameserver ${PUB_DNS2}
-search ${SEARCH_DOMAIN}
-EOF
-echo "  Contenido:"
-sed 's/^/    /' /etc/resolv.conf
+# --- 3. Restaurar /etc/resolv.conf si fue tocado por HauntKit ---
+RESTORE_RESOLV=false
+if [ -f /etc/resolv.conf ] && grep -q "Generado por HauntKit tailscale-dns-fix.sh" /etc/resolv.conf 2>/dev/null; then
+    log "Detectado /etc/resolv.conf modificado por HauntKit — restaurando..."
+    RESTORE_RESOLV=true
+fi
 
-# --- 4. Ampliar rango de puertos efímeros (defensa extra) ------------------
-log "Ampliando rango de puertos efímeros a 1024-65535 (64k)..."
-sysctl -w net.ipv4.ip_local_port_range="1024 65535" >/dev/null
-echo "net.ipv4.ip_local_port_range=1024 65535" > "${SYSCTL_FILE}"
-echo "  Persistido en ${SYSCTL_FILE}"
-
-# --- 5. Verificación --------------------------------------------------------
-log "Verificando resolución DNS (pool, GitHub, tailnet)..."
-verify() {
-    local label="$1" host="$2"
-    local ip
-    ip=$(getent hosts "${host}" | awk '{print $1}' | head -1)
-    if [ -n "${ip}" ]; then
-        echo "  ✓ ${label}: ${ip}"
-    else
-        echo "  ✗ ${label}: NO resuelve"
-        return 1
+if $RESTORE_RESOLV; then
+    # Restaurar sysctl si se modificó
+    if [ -f "${SYSCTL_FILE}" ]; then
+        rm -f "${SYSCTL_FILE}"
+        sysctl -w net.ipv4.ip_local_port_range="32768 60999" >/dev/null
+        log "Rango de puertos restaurado a valores por defecto"
     fi
-}
-verify "pool          " "gulf.moneroocean.stream" || true
-verify "github        " "github.com"              || true
-# tailnet: usa el DNSName real de Tailscale (Self) si está disponible
-TS_OWN=""
-if command -v tailscale >/dev/null 2>&1; then
-    TS_OWN=$(tailscale status --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    n = d.get("Self", {}).get("DNSName", "")
-    print(n.rstrip("."))
-except Exception:
-    print("")
-' 2>/dev/null || true)
-fi
-if [ -n "${TS_OWN}" ]; then
-    verify "tailnet (.ts.) " "${TS_OWN}" || true
+
+    # Restaurar resolv.conf: intentar backup de systemd-resolved, o generar uno básico
+    if [ -f /run/systemd/resolve/resolv.conf ]; then
+        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || \
+        cp /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        log "/etc/resolv.conf restaurado desde systemd-resolved"
+    elif [ -f /run/systemd/resolve/stub-resolv.conf ]; then
+        ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf 2>/dev/null || \
+        cp /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+        log "/etc/resolv.conf restaurado desde stub-resolv.conf"
+    else
+        # Generar uno limpio con DNS público
+        cat > /etc/resolv.conf <<EOF
+# Generado por HauntKit — restauración post-fix
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOF
+        log "/etc/resolv.conf generado con DNS público (8.8.8.8, 8.8.4.4)"
+    fi
+    chmod 644 /etc/resolv.conf
+    log "✓ /etc/resolv.conf restaurado correctamente"
 else
-    verify "tailnet (.ts.) " "$(hostname).${SEARCH_DOMAIN}" || true
+    log "/etc/resolv.conf NO fue modificado por HauntKit — sin cambios"
 fi
 
-log "=== LISTO. Fix aplicado. No se quitó Tailscale ni earnapp. ==="
-log "Para REVERTIR:"
-log "  tailscale set --accept-dns=true"
-log "  systemctl enable --now systemd-resolved"
-log "  ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf"
-log "  rm -f ${SYSCTL_FILE} && sysctl -w net.ipv4.ip_local_port_range=32768\ 60999"
+# --- 4. Restaurar sysctl si existe el archivo de fix anterior ---
+if [ -f "${SYSCTL_FILE}" ]; then
+    log "Limpiando persistencia de sysctl anterior..."
+    rm -f "${SYSCTL_FILE}"
+    sysctl -w net.ipv4.ip_local_port_range="32768 60999" >/dev/null
+    log "Rango de puertos restaurado"
+fi
+
+log "=== LISTO. DNS fix completado. /etc/resolv.conf no fue modificado. ==="
 exit 0
