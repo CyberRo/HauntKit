@@ -366,7 +366,7 @@ if [ "$GPU_RECOMMENDED" = "true" ] && [ -f "$DATA_DIR/.gpu-vendor" ]; then
 fi
 
 # Escribir config.json template
-cat > "$XMRIG_CONFIG" << TEMPLATE
+cat > "$XMRIG_CONFIG" <<TEMPLATE
 {
     "autosave": true,
     "donate-level": 0,
@@ -391,7 +391,7 @@ TEMPLATE
 # Si el JSON quedó mal formado por GPU_PART vacío, arreglar
 if [ -z "$GPU_PART" ]; then
     # El template de arriba tiene la coma extra de GPU, re-generar sin ella
-    cat > "$XMRIG_CONFIG" << TEMPLATE
+    cat > "$XMRIG_CONFIG" <<TEMPLATE
 {
     "autosave": true,
     "donate-level": 0,
