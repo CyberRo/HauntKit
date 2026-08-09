@@ -3,6 +3,7 @@
 #  HauntKit — bump-version
 #  Actualiza la versión de TODO el proyecto en un comando.
 #  Aplica la MISMA versión al archivo VERSION (raíz) y a la
+YELLOW='033[1;33m'
 #  cabecera de todos los scripts que la muestran.
 #  Uso: bash tools/utils/bump-version.sh <nueva_version>
 # ════════════════════════════════════════════════════════
