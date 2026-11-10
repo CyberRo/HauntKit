@@ -55,18 +55,41 @@ CUR_MAX_CPU="$ORIG_MAX_CPU"
 CUR_THREADS="$ORIG_THREADS"
 
 # ─── Leer temperatura actual (°C) ───
+# Devuelve un entero >= 0. Si no se puede leer, devuelve 999 (forzar parada por seguridad).
 get_cpu_temp() {
-    local temp=""
+    local temp="" zone max_temp=0
+
+    # 1) Intentar con lm-sensors (formato portable, sin -oP)
     if command -v sensors &>/dev/null; then
-        temp=$(sensors -u 2>/dev/null | grep -m1 -E 'temp1_input|Package id 0' | awk '{print $2}' | cut -d. -f1)
-        [ -z "$temp" ] && temp=$(sensors 2>/dev/null | grep -oP 'Package id 0:\s+\+\K[0-9]+')
-        [ -z "$temp" ] && temp=$(sensors 2>/dev/null | grep -oP 'Tctl:\s+\+\K[0-9]+')
+        temp=$(sensors -u 2>/dev/null \
+            | grep -E 'Package id 0|temp[0-9]+_input' \
+            | head -1 \
+            | awk -F': ' '{print $2}' \
+            | cut -d. -f1)
+        temp="${temp#+}"
+        temp="${temp%%.*}"
     fi
-    if [ -z "$temp" ] && [ -f /sys/class/thermal/thermal_zone0/temp ]; then
-        temp=$(cat /sys/class/thermal/thermal_zone0/temp)
-        temp=$(( temp / 1000 ))
+
+    # 2) Fallback: leer todas las zonas térmicas y quedarse con la máxima
+    if [ -z "$temp" ] || ! [[ "$temp" =~ ^[0-9]+$ ]]; then
+        for zone in /sys/class/thermal/thermal_zone*/temp; do
+            [ -f "$zone" ] || continue
+            local raw
+            raw=$(cat "$zone" 2>/dev/null)
+            [ -z "$raw" ] && continue
+            local t=$(( raw / 1000 ))
+            [ "$t" -gt "$max_temp" ] && max_temp="$t"
+        done
+        [ "$max_temp" -gt 0 ] && temp="$max_temp"
     fi
-    echo "${temp:-0}"
+
+    # 3) Validación final: si no es número válido, asumir crítico para seguridad
+    if ! [[ "$temp" =~ ^[0-9]+$ ]]; then
+        echo "999"
+        return
+    fi
+
+    echo "$temp"
 }
 
 # ─── Detectar si hay ventilación activa (ventiladores) ───
@@ -302,11 +325,9 @@ stop_worker() {
 check_temp() {
     [ "$MAX_TEMP" -eq 0 ] && return 0
     local temp
-    if command -v sensors &>/dev/null; then
-        temp=$(sensors -u 2>/dev/null | grep -m1 'temp1_input' | awk '{print $2}' | cut -d. -f1)
-        [ -z "$temp" ] && return 0
-        [ "$temp" -ge "$MAX_TEMP" ] && return 1
-    fi
+    temp=$(get_cpu_temp)
+    # get_cpu_temp ya devuelve 999 si falla, lo cual activará la parada
+    [ "$temp" -ge "$MAX_TEMP" ] && return 1
     return 0
 }
 
